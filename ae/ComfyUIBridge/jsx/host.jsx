@@ -320,9 +320,296 @@ var AE2C = (function () {
         return JSON.stringify({ ok: !!_manifestLib, fields: fields });
     }
 
+    // --- video export (AME) --------------------------------------------------
+
+    // AME transfer sends ALL queued render items, so we park the user's items
+    // (render=false), queue ours, then restore. AE-version verification point:
+    // whether transferred items stay in the AE queue afterwards.
+    var _videoJobs = {};
+
+    var TEMPLATE_CANDIDATES = {
+        prores_4444: ["Apple ProRes 4444", "ProRes 4444", "Lossless with Alpha"],
+        prores_422hq: ["Apple ProRes 422 HQ", "ProRes 422 HQ"],
+        mp4: ["H.264 - Match Render Settings - High Quality", "H.264"]
+    };
+
+    function _applyTemplateByName(om, overrideName, candidates) {
+        var wanted = overrideName ? [overrideName] : candidates;
+        var available = om.templates;
+        for (var w = 0; w < wanted.length; w++) {
+            for (var i = 0; i < available.length; i++) {
+                if (available[i] === wanted[w]) {
+                    om.applyTemplate(wanted[w]);
+                    return wanted[w];
+                }
+            }
+        }
+        throw new Error(
+            "output module template not found: " + wanted.join(" | ") +
+            " — configure AME template names in Settings. Available: " +
+            available.join(", ")
+        );
+    }
+
+    function _soloOnly(comp, layer, on) {
+        try {
+            if (layer.solo !== undefined) layer.solo = on;
+        } catch (e) { /* non-soloable layer type */ }
+    }
+
+    function _queueVideoRender(comp, start, duration, outPath, templateOverride, candidates) {
+        var rq = app.project.renderQueue;
+        var parked = [];
+        var item = null;
+        try {
+            for (var i = 1; i <= rq.numItems; i++) {
+                try {
+                    var it = rq.item(i);
+                    if (it.render) {
+                        it.render = false;
+                        parked.push(it);
+                    }
+                } catch (e) {}
+            }
+            item = rq.items.add(comp);
+            item.timeSpanStart = start;
+            item.timeSpanDuration = duration;
+            var om = item.outputModule(1);
+            _applyTemplateByName(om, templateOverride, candidates);
+            om.file = new File(outPath);
+            rq.queueInAME(true);
+        } finally {
+            for (var p = 0; p < parked.length; p++) {
+                try { parked[p].render = true; } catch (e) {}
+            }
+            // If our item survived the AME transfer in the AE queue, disable
+            // it so a later manual render doesn't redo it.
+            if (item) {
+                try { item.render = false; } catch (e) {}
+            }
+        }
+    }
+
+    function exportVideo(optsJSON) {
+        var maskComp = null;
+        try {
+            var opts = JSON.parse(optsJSON);
+            var comp = _activeComp();
+            if (!comp) return _err("no active composition");
+            var layer = _selectedLayer(comp);
+            if (!layer) return _err("no layer selected");
+
+            var ctx = JSON.parse(getContextJSON());
+            if (!ctx.ok) return _err(ctx.error);
+            var manifest = buildManifest(opts, ctx);
+
+            var jobDir = _join(opts.staging_folder, manifest.job_id);
+            _ensureFolder(jobDir);
+
+            var fmt = manifest.video_format; // mov | mp4
+            var mainPath = _join(jobDir, "main." + fmt);
+            var maskPath = manifest.mask_mode !== "none"
+                ? _join(jobDir, "mask.mp4") : "";
+
+            var start = manifest.timeline_start_seconds;
+            var dur = manifest.duration_seconds;
+
+            // Solo the selected layer so the export carries only that layer.
+            _soloOnly(comp, layer, true);
+            try {
+                var candidates = (fmt === "mp4")
+                    ? TEMPLATE_CANDIDATES.mp4
+                    : TEMPLATE_CANDIDATES[manifest.mov_codec];
+                _queueVideoRender(comp, start, dur, mainPath,
+                    opts.ame_main_template || "", candidates);
+
+                if (maskPath) {
+                    maskComp = _buildMaskComp(
+                        comp, layer, manifest.mask_mode === "invert",
+                        "AE2C Mask " + manifest.job_id
+                    );
+                    maskComp.duration = dur;
+                    _queueVideoRender(maskComp, 0, dur, maskPath,
+                        opts.ame_mask_template || "", TEMPLATE_CANDIDATES.mp4);
+                }
+            } finally {
+                _soloOnly(comp, layer, false);
+            }
+
+            var manifestPath = _join(jobDir, "job_manifest.json");
+            _writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+
+            _videoJobs[manifest.job_id] = {
+                main_path: mainPath,
+                mask_path: maskPath,
+                sizes: {},
+                stable: {},
+                started: new Date().getTime()
+            };
+
+            return JSON.stringify({
+                ok: true,
+                queued: true,
+                main_path: mainPath,
+                mask_path: maskPath,
+                manifest_path: manifestPath,
+                manifest: manifest
+            });
+        } catch (e) {
+            return _err("exportVideo failed: " + e);
+        } finally {
+            if (maskComp) {
+                try { maskComp.remove(); } catch (e) {}
+            }
+        }
+    }
+
+    function _fileStable(job, path) {
+        var f = new File(path);
+        if (!f.exists || f.length <= 0) return false;
+        var size = f.length;
+        if (job.sizes[path] === size) {
+            job.stable[path] = (job.stable[path] || 0) + 1;
+        } else {
+            job.stable[path] = 0;
+        }
+        job.sizes[path] = size;
+        return job.stable[path] >= 1; // unchanged across two polls
+    }
+
+    function exportVideoStatus(optsJSON) {
+        try {
+            var opts = JSON.parse(optsJSON);
+            var job = _videoJobs[opts.job_id];
+            if (!job) return _err("unknown video job: " + opts.job_id);
+            var mainDone = _fileStable(job, job.main_path);
+            var maskDone = !job.mask_path || _fileStable(job, job.mask_path);
+            return JSON.stringify({
+                ok: true,
+                done: mainDone && maskDone,
+                main_ready: mainDone,
+                mask_ready: maskDone,
+                elapsed_ms: new Date().getTime() - job.started
+            });
+        } catch (e) {
+            return _err("exportVideoStatus failed: " + e);
+        }
+    }
+
+    function cancelVideo(optsJSON) {
+        // Stops local tracking/polling. The AME encode and the ComfyUI queue
+        // item keep running server-side; the panel also POSTs /interrupt.
+        try {
+            var opts = JSON.parse(optsJSON);
+            var existed = !!_videoJobs[opts.job_id];
+            delete _videoJobs[opts.job_id];
+            return JSON.stringify({ ok: true, cancelled: existed });
+        } catch (e) {
+            return _err("cancelVideo failed: " + e);
+        }
+    }
+
+    // --- result import -------------------------------------------------------
+
+    function _findCompById(compId) {
+        for (var i = 1; i <= app.project.numItems; i++) {
+            var item = app.project.item(i);
+            if (item instanceof CompItem && item.id === compId) return item;
+        }
+        return null;
+    }
+
+    function _importFile(path) {
+        var io = new ImportOptions(new File(path));
+        return app.project.importFile(io);
+    }
+
+    function importResult(optsJSON) {
+        try {
+            var opts = JSON.parse(optsJSON);
+            var manifest = opts.manifest;
+            if (!manifest || !manifest.job_id) return _err("importResult: no manifest");
+            var resultPath = String(opts.result_path || "");
+            if (!new File(resultPath).exists) {
+                return _err("result file not found: " + resultPath);
+            }
+
+            var comp = _findCompById(manifest.comp_id);
+            if (!comp) return _err("composition no longer exists (id " + manifest.comp_id + ")");
+
+            var footage = _importFile(resultPath);
+
+            // Hard validation: no silent geometry/time drift.
+            var problems = [];
+            if (footage.width !== manifest.width || footage.height !== manifest.height) {
+                problems.push("dimensions " + footage.width + "x" + footage.height +
+                    " != manifest " + manifest.width + "x" + manifest.height);
+            }
+            if (manifest.media_type === "video") {
+                try {
+                    var fpsDelta = Math.abs((footage.frameRate || manifest.fps) - manifest.fps);
+                    if (fpsDelta > 0.05) {
+                        problems.push("fps " + footage.frameRate + " != " + manifest.fps);
+                    }
+                    var resultFrames = footage.duration * manifest.fps;
+                    if (Math.abs(resultFrames - manifest.frame_count) > 1.5) {
+                        problems.push("frame count ~" + Math.round(resultFrames) +
+                            " != " + manifest.frame_count);
+                    }
+                } catch (e) {
+                    problems.push("cannot verify fps/duration: " + e);
+                }
+            }
+            if (problems.length) {
+                try { footage.remove(); } catch (e) {}
+                return _err("result mismatch: " + problems.join("; "));
+            }
+
+            var layer = comp.layers.add(footage);
+            layer.name = "AE2C Result " + manifest.job_id.substring(0, 8);
+
+            var anchor = manifest.timeline_start_seconds;
+            if (manifest.media_type === "video") {
+                layer.startTime = 0;
+                layer.inPoint = anchor;
+                layer.outPoint = anchor + footage.duration;
+            } else {
+                // Still: span the comp so it is visible at the anchor time;
+                // the user trims as needed.
+                layer.startTime = 0;
+                layer.inPoint = 0;
+                layer.outPoint = comp.duration;
+            }
+
+            if (manifest.placement === "top_of_comp") {
+                layer.moveToBeginning();
+            } else {
+                var idx = manifest.selected_layer_index;
+                if (idx > 0 && idx <= comp.numLayers) {
+                    layer.moveBefore(comp.layer(idx));
+                } else {
+                    layer.moveToBeginning();
+                }
+            }
+
+            return JSON.stringify({
+                ok: true,
+                layer_index: layer.index,
+                layer_name: layer.name,
+                placed_at_seconds: anchor
+            });
+        } catch (e) {
+            return _err("importResult failed: " + e);
+        }
+    }
+
     return {
         getContextJSON: getContextJSON,
         exportStill: exportStill,
+        exportVideo: exportVideo,
+        exportVideoStatus: exportVideoStatus,
+        cancelVideo: cancelVideo,
+        importResult: importResult,
         buildManifest: buildManifest,
         manifestFieldsJSON: manifestFieldsJSON
     };
