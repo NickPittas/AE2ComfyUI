@@ -94,3 +94,24 @@ def test_to_ae_unique_filenames():
     ToAE().push(img, "job-n1", "dup", "png")
     r1 = job_store.get_result("job-n1")["path"]
     assert r1.endswith("dup.001.png")
+
+
+def test_to_ae_srgb_mode_embeds_icc():
+    from PIL import Image
+    import io
+
+    image = torch.rand((1, 4, 8, 3), dtype=torch.float32)
+    body, _, _ = image_io.encode_image_bytes(image, "png")
+    job_store.create_job("job-srgb", {"bridge_color_mode": "srgb"})
+    path = job_store.job_dir("job-srgb") + "/main.png"
+    with open(path, "wb") as fh:
+        fh.write(body)
+    job_store.store_asset("job-srgb", "main", path)
+
+    ToAE().push(image, "job-srgb", "icc", "png")
+    result = job_store.get_result("job-srgb")
+    info = Image.open(result["path"]).info
+    if image_io._srgb_icc_bytes() is not None:
+        assert info.get("icc_profile")
+    else:
+        assert not info.get("icc_profile")

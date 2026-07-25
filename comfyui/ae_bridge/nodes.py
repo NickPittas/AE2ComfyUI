@@ -115,7 +115,11 @@ class ToAE:
         if mask is not None and fmt == "jpg":
             print("[AEBridge] ToAE: mask ignored for jpg output", flush=True)
             mask = None
-        body, _content_type, _tag = image_io.encode_image_bytes(image, fmt, mask)
+        meta = _job_metadata(jid)
+        embed_icc = str(meta.get("bridge_color_mode") or "") == "srgb"
+        body, _content_type, _tag = image_io.encode_image_bytes(
+            image, fmt, mask, embed_srgb_icc=embed_icc
+        )
         path = _unique_result_path(jid, filename_prefix, fmt)
         with open(path, "wb") as fh:
             fh.write(body)

@@ -197,10 +197,28 @@ var AE2C = (function () {
         return null;
     }
 
-    function _renderStillToFile(comp, time, folder, baseName, imageFormat) {
+    // Best-effort Output Module color settings. Setting keys are AE-version
+    // dependent (validation point); failure is non-fatal and reported via the
+    // color_applied flag so the panel can surface a warning.
+    function _applyColorSettings(om, manifest) {
+        try {
+            var mode = manifest.bridge_color_mode;
+            if (mode === "srgb" || mode === "rec709") {
+                om.setSettings({ "Output Profile": manifest.output_color_space });
+            } else {
+                om.setSettings({ "Preserve RGB": true });
+            }
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function _renderStillToFile(comp, time, folder, baseName, imageFormat, manifest) {
         var rq = app.project.renderQueue;
         var item = null;
         var savedTime = comp.time;
+        var colorApplied = false;
         try {
             comp.time = time;
             item = _newRenderItem(comp);
@@ -208,6 +226,7 @@ var AE2C = (function () {
             item.timeSpanDuration = 1 / comp.frameRate;
             var om = item.outputModule(1);
             _applyStillFormat(om, imageFormat);
+            if (manifest) colorApplied = _applyColorSettings(om, manifest);
             _setSingleFrameSequencePath(om, folder, baseName + "_[#####]");
             rq.render();
             var found = _findRenderedFile(
@@ -215,7 +234,7 @@ var AE2C = (function () {
                 (imageFormat === "jpg") ? [".jpg", ".jpeg"] : [".png"]
             );
             if (!found) throw new Error("render produced no file for " + baseName);
-            return found;
+            return { path: found, color_applied: colorApplied };
         } finally {
             comp.time = savedTime;
             if (item) {
@@ -279,9 +298,11 @@ var AE2C = (function () {
             _ensureFolder(jobDir);
 
             var fmt = (opts.image_format === "jpg") ? "jpg" : "png";
-            var mainPath = _renderStillToFile(
-                comp, ctx.current_time, jobDir, "main", fmt
+            var main = _renderStillToFile(
+                comp, ctx.current_time, jobDir, "main", fmt, manifest
             );
+            var mainPath = main.path;
+            var colorApplied = main.color_applied;
 
             var maskPath = "";
             if (manifest.mask_mode !== "none") {
@@ -289,9 +310,12 @@ var AE2C = (function () {
                     comp, layer, manifest.mask_mode === "invert",
                     "AE2C Mask " + manifest.job_id
                 );
+                // Masks are data: always preserve RGB.
+                var maskManifest = JSON.parse(JSON.stringify(manifest));
+                maskManifest.bridge_color_mode = "preserve_rgb";
                 maskPath = _renderStillToFile(
-                    maskComp, ctx.current_time, jobDir, "mask", "png"
-                );
+                    maskComp, ctx.current_time, jobDir, "mask", "png", maskManifest
+                ).path;
             }
 
             var manifestPath = _join(jobDir, "job_manifest.json");
@@ -302,7 +326,8 @@ var AE2C = (function () {
                 main_path: mainPath,
                 mask_path: maskPath,
                 manifest_path: manifestPath,
-                manifest: manifest
+                manifest: manifest,
+                color_applied: colorApplied
             });
         } catch (e) {
             return _err("exportStill failed: " + e);
@@ -357,10 +382,11 @@ var AE2C = (function () {
         } catch (e) { /* non-soloable layer type */ }
     }
 
-    function _queueVideoRender(comp, start, duration, outPath, templateOverride, candidates) {
+    function _queueVideoRender(comp, start, duration, outPath, templateOverride, candidates, manifest) {
         var rq = app.project.renderQueue;
         var parked = [];
         var item = null;
+        var colorApplied = false;
         try {
             for (var i = 1; i <= rq.numItems; i++) {
                 try {
@@ -376,6 +402,7 @@ var AE2C = (function () {
             item.timeSpanDuration = duration;
             var om = item.outputModule(1);
             _applyTemplateByName(om, templateOverride, candidates);
+            if (manifest) colorApplied = _applyColorSettings(om, manifest);
             om.file = new File(outPath);
             rq.queueInAME(true);
         } finally {
@@ -388,6 +415,7 @@ var AE2C = (function () {
                 try { item.render = false; } catch (e) {}
             }
         }
+        return colorApplied;
     }
 
     function exportVideo(optsJSON) {
@@ -416,12 +444,13 @@ var AE2C = (function () {
 
             // Solo the selected layer so the export carries only that layer.
             _soloOnly(comp, layer, true);
+            var colorApplied = false;
             try {
                 var candidates = (fmt === "mp4")
                     ? TEMPLATE_CANDIDATES.mp4
                     : TEMPLATE_CANDIDATES[manifest.mov_codec];
-                _queueVideoRender(comp, start, dur, mainPath,
-                    opts.ame_main_template || "", candidates);
+                colorApplied = _queueVideoRender(comp, start, dur, mainPath,
+                    opts.ame_main_template || "", candidates, manifest);
 
                 if (maskPath) {
                     maskComp = _buildMaskComp(
@@ -429,8 +458,12 @@ var AE2C = (function () {
                         "AE2C Mask " + manifest.job_id
                     );
                     maskComp.duration = dur;
+                    // Masks are data: always preserve RGB.
+                    var maskManifest = JSON.parse(JSON.stringify(manifest));
+                    maskManifest.bridge_color_mode = "preserve_rgb";
                     _queueVideoRender(maskComp, 0, dur, maskPath,
-                        opts.ame_mask_template || "", TEMPLATE_CANDIDATES.mp4);
+                        opts.ame_mask_template || "", TEMPLATE_CANDIDATES.mp4,
+                        maskManifest);
                 }
             } finally {
                 _soloOnly(comp, layer, false);
@@ -453,7 +486,8 @@ var AE2C = (function () {
                 main_path: mainPath,
                 mask_path: maskPath,
                 manifest_path: manifestPath,
-                manifest: manifest
+                manifest: manifest,
+                color_applied: colorApplied
             });
         } catch (e) {
             return _err("exportVideo failed: " + e);

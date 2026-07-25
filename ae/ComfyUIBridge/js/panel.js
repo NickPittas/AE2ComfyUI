@@ -318,6 +318,11 @@
                 exportResult = exp;
                 manifest = exp.manifest;
                 checkCancelled();
+                if (exp.color_applied === false) {
+                    setStatus(statusEl, "Warning: output-module color settings " +
+                        "were not applied (unsupported AE version) — verify " +
+                        "colors manually.");
+                }
                 if (choices.media_type === "video") return waitForAmeExport(choices);
             })
             .then(function () {

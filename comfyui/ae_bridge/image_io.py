@@ -47,15 +47,27 @@ def decode_image_bytes(data: bytes, fmt: object) -> Tuple[torch.Tensor, torch.Te
     return image, mask, width, height
 
 
+def _srgb_icc_bytes() -> Optional[bytes]:
+    """sRGB ICC profile bytes via Pillow's ImageCms; None when unavailable."""
+    try:
+        from PIL import ImageCms
+        profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB"))
+        return profile.tobytes()
+    except Exception:
+        return None
+
+
 def encode_image_bytes(
     image: torch.Tensor,
     fmt: object,
     mask: Optional[torch.Tensor] = None,
+    embed_srgb_icc: bool = False,
 ) -> Tuple[bytes, str, str]:
     """Encode an IMAGE tensor; returns (bytes, content_type, format_tag).
 
-    PNG embeds `mask` as the alpha channel when provided (alpha = 1 - mask).
-    JPG always encodes opaque RGB at quality 95.
+    PNG embeds `mask` as the alpha channel when provided (alpha = 1 - mask),
+    and embeds an sRGB ICC profile when `embed_srgb_icc` is set (srgb
+    transport mode). JPG always encodes opaque RGB at quality 95.
     """
     fmt = normalize_format(fmt)
     if image.dim() == 3:
@@ -79,5 +91,9 @@ def encode_image_bytes(
     else:
         img = Image.fromarray(arr8, mode="RGB")
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    icc = _srgb_icc_bytes() if embed_srgb_icc else None
+    if icc:
+        img.save(buf, format="PNG", icc_profile=icc)
+    else:
+        img.save(buf, format="PNG")
     return buf.getvalue(), "image/png", "png"

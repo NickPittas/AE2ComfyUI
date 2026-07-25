@@ -81,3 +81,25 @@ def test_decode_real_png_with_alpha():
     assert (w, h) == (8, 4)
     assert float(mask[0, 0, 0]) > 0.9  # alpha 0 -> masked
     assert float(mask[0, 0, -1]) < 0.1  # alpha 255 -> keep
+
+
+def test_png_srgb_icc_embedded_on_request():
+    from PIL import Image
+    import io
+
+    body, _, _ = image_io.encode_image_bytes(make_image(), "png", embed_srgb_icc=True)
+    info = Image.open(io.BytesIO(body)).info
+    icc = info.get("icc_profile")
+    if image_io._srgb_icc_bytes() is None:
+        assert not icc  # ImageCms unavailable: silently skipped
+    else:
+        # lcms-generated sRGB profile; no literal 'sRGB' string inside.
+        assert icc and len(bytes(icc)) > 100
+
+
+def test_png_no_icc_by_default():
+    from PIL import Image
+    import io
+
+    body, _, _ = image_io.encode_image_bytes(make_image(), "png")
+    assert not Image.open(io.BytesIO(body)).info.get("icc_profile")
