@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AE2ComfyUI</title>
+<style>
+  :root {
+    --bg: #232323; --bg2: #2d2d2d; --fg: #d8d8d8; --dim: #9a9a9a;
+    --accent: #4f8cff; --ok: #46a35e; --err: #d05050; --border: #3c3c3c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 8px; background: var(--bg); color: var(--fg);
+    font: 12px/1.45 -apple-system, "Segoe UI", sans-serif;
+    user-select: none; overflow-x: hidden;
+  }
+  .tabs { display: flex; gap: 4px; margin-bottom: 8px; }
+  .tabs button {
+    flex: 1; padding: 6px; background: var(--bg2); color: var(--dim);
+    border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
+  }
+  .tabs button.active { color: var(--fg); border-color: var(--accent); }
+  .row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  .row label { width: 110px; color: var(--dim); flex-shrink: 0; }
+  .row input[type=text], .row input[type=number], .row select, .row textarea {
+    flex: 1; min-width: 0; background: var(--bg2); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 3px; padding: 4px 6px;
+  }
+  textarea { resize: vertical; min-height: 48px; user-select: text; }
+  button.action {
+    width: 100%; padding: 8px; margin-top: 4px; border: 0; border-radius: 4px;
+    background: var(--accent); color: #fff; font-weight: 600; cursor: pointer;
+  }
+  button.action:disabled { background: var(--border); color: var(--dim); cursor: default; }
+  button.secondary { background: var(--bg2); color: var(--fg); border: 1px solid var(--border); }
+  #status {
+    margin-top: 8px; padding: 6px; background: var(--bg2); border-radius: 4px;
+    color: var(--dim); min-height: 30px; white-space: pre-wrap; user-select: text;
+  }
+  #status.ok { color: var(--ok); }
+  #status.err { color: var(--err); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+         background: var(--err); margin-right: 6px; vertical-align: middle; }
+  .dot.on { background: var(--ok); }
+  .hidden { display: none; }
+  progress { width: 100%; margin-top: 6px; }
+</style>
+</head>
+<body>
+  <div class="tabs">
+    <button id="tab-generate" class="active">Generate</button>
+    <button id="tab-settings">Settings</button>
+  </div>
+
+  <div id="page-generate">
+    <div class="row">
+      <label>ComfyUI</label>
+      <span><span id="conn-dot" class="dot"></span><span id="conn-text">disconnected</span></span>
+      <button id="btn-refresh" class="secondary" style="flex:0">Refresh</button>
+    </div>
+    <div class="row">
+      <label>Workflow</label>
+      <select id="workflow"></select>
+    </div>
+    <div class="row">
+      <label>Prompt</label>
+      <textarea id="prompt" placeholder="Describe the edit..."></textarea>
+    </div>
+    <div class="row">
+      <label>Input</label>
+      <select id="media-type">
+        <option value="image">Image (current frame)</option>
+        <option value="video">Video (range)</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>Mask</label>
+      <select id="mask-mode">
+        <option value="none">No mask</option>
+        <option value="use">Use layer alpha</option>
+        <option value="invert">Invert layer alpha</option>
+      </select>
+    </div>
+    <div class="row" id="row-image-format">
+      <label>Image format</label>
+      <select id="image-format">
+        <option value="png">PNG (alpha)</option>
+        <option value="jpg">JPG (opaque)</option>
+      </select>
+    </div>
+    <div class="row hidden" id="row-video-format">
+      <label>Video format</label>
+      <select id="video-format">
+        <option value="mov">MOV ProRes 4444</option>
+        <option value="mov422">MOV ProRes 422 HQ</option>
+        <option value="mp4">MP4 (H.264)</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>Color</label>
+      <select id="color-mode">
+        <option value="preserve_working_space">Preserve AE working space</option>
+        <option value="srgb">sRGB transport</option>
+        <option value="rec709">Rec.709 transport</option>
+        <option value="preserve_rgb">Preserve RGB (data only)</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>Result folder</label>
+      <input type="text" id="result-folder" placeholder="(settings default)">
+      <button id="btn-result-browse" class="secondary" style="flex:0">…</button>
+    </div>
+    <div class="row">
+      <label>Placement</label>
+      <select id="placement">
+        <option value="above_selected_layer">Above selected layer</option>
+        <option value="top_of_comp">Top of composition</option>
+      </select>
+    </div>
+    <button id="btn-queue" class="action">Queue in ComfyUI</button>
+    <button id="btn-cancel" class="action secondary hidden">Cancel</button>
+    <progress id="progress" class="hidden" max="1" value="0"></progress>
+    <div id="status">Idle.</div>
+  </div>
+
+  <div id="page-settings" class="hidden">
+    <div class="row"><label>ComfyUI host</label><input type="text" id="set-host"></div>
+    <div class="row"><label>ComfyUI port</label><input type="number" id="set-port" min="1" max="65535"></div>
+    <div class="row"><label>Staging folder</label><input type="text" id="set-staging"><button id="btn-staging-browse" class="secondary" style="flex:0">…</button></div>
+    <div class="row"><label>Result folder</label><input type="text" id="set-result"><button id="btn-result-browse2" class="secondary" style="flex:0">…</button></div>
+    <div class="row"><label>Workflow dirs</label><input type="text" id="set-workflowdirs" placeholder="path;path"></div>
+    <div class="row"><label>AME main preset</label><input type="text" id="set-ame-main" placeholder="template name"></div>
+    <div class="row"><label>AME mask preset</label><input type="text" id="set-ame-mask" placeholder="template name"></div>
+    <button id="btn-save-settings" class="action">Save settings</button>
+    <button id="btn-test-conn" class="action secondary">Test connection</button>
+    <div id="status-settings"></div>
+  </div>
+
+  <script src="js/settings.js"></script>
+  <script src="js/panel.js"></script>
+</body>
+</html>
