@@ -50,6 +50,25 @@ def register_handlers(dispatcher: Any) -> bool:
     except Exception:
         return False
 
+    # CEP panels run from a file:// origin; without these headers Chromium
+    # blocks the panel's fetch calls depending on CEF security flags.
+    _CORS_HEADERS = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+    }
+
+    def _with_cors(handler):
+        async def wrapped(request):
+            resp = await handler(request)
+            for key, value in _CORS_HEADERS.items():
+                resp.headers[key] = value
+            return resp
+        return wrapped
+
+    async def _options(_request):
+        return web.Response(headers=_CORS_HEADERS)
+
     async def _health(_request: Any) -> Any:
         return web.json_response({"ok": True, "app": "ae2comfyui"})
 
@@ -172,10 +191,11 @@ def register_handlers(dispatcher: Any) -> bool:
     )
     for method, path, handler in spec:
         try:
-            getattr(dispatcher, "add_" + method.lower())(path, handler)
+            getattr(dispatcher, "add_" + method.lower())(path, _with_cors(handler))
+            dispatcher.add_options(path, _options)
         except Exception:
             try:
-                getattr(dispatcher, method.lower())(path)(handler)
+                getattr(dispatcher, method.lower())(path)(_with_cors(handler))
             except Exception:
                 pass
     return True

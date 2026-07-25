@@ -28,9 +28,17 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         async with make_client(None) as client:
             resp = await client.get("/ae_bridge/health")
             self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.headers["Access-Control-Allow-Origin"], "*")
             data = await resp.json()
             self.assertTrue(data["ok"])
             self.assertEqual(data["app"], "ae2comfyui")
+
+    async def test_options_preflight(self):
+        async with make_client(None) as client:
+            resp = await client.options("/ae_bridge/assets")
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.headers["Access-Control-Allow-Origin"], "*")
+            self.assertIn("POST", resp.headers["Access-Control-Allow-Methods"])
 
     async def test_upload_and_get_job(self):
         async with make_client(None) as client:
