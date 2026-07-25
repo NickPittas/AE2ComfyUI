@@ -205,6 +205,8 @@ Manifest fields (exact):
   "fps": 0, "frame_count": 1, "duration_seconds": 0,
   "timeline_start_seconds": 0, "timeline_end_seconds_exclusive": 0,
   "range_source": "work_area|layer_range|comp|current_frame",
+  "video_format": "mov|mp4",
+  "mov_codec": "prores_4444|prores_422hq",
   "comp_id": 0, "selected_layer_index": 0,
   "placement": "above_selected_layer|top_of_comp",
   "mask_mode": "none|use|invert",

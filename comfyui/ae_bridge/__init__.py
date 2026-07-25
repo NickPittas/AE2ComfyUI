@@ -9,15 +9,19 @@ NODE_DISPLAY_NAME_MAPPINGS = {}
 # Node classes are registered lazily so the package still imports (and routes
 # still work) when torch is unavailable, e.g. in plain test environments.
 try:
-    from .nodes import FromAE, ToAE
+    from .nodes import FromAE, FromAEVideo, ToAE, ToAEVideo
 
     NODE_CLASS_MAPPINGS = {
         "FromAE": FromAE,
+        "FromAEVideo": FromAEVideo,
         "ToAE": ToAE,
+        "ToAEVideo": ToAEVideo,
     }
     NODE_DISPLAY_NAME_MAPPINGS = {
         "FromAE": "AE Bridge: From AE",
+        "FromAEVideo": "AE Bridge: From AE Video",
         "ToAE": "AE Bridge: To AE",
+        "ToAEVideo": "AE Bridge: To AE Video",
     }
 except Exception:  # torch missing outside ComfyUI; routes still register below
     pass
