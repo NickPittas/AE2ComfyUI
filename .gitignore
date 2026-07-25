@@ -15,3 +15,4 @@ node_modules/
 
 # Saved user workflows stay in-repo but ignore runtime job staging
 workflows/*.tmp.json
+.venv/
