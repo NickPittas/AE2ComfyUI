@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+
+# Test artifacts
+/tmp/
+
+# Saved user workflows stay in-repo but ignore runtime job staging
+workflows/*.tmp.json
