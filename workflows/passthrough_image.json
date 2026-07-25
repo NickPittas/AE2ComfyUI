@@ -1,0 +1,19 @@
+{
+  "1": {
+    "class_type": "FromAE",
+    "inputs": {
+      "job_id": "",
+      "asset_id": "main"
+    }
+  },
+  "2": {
+    "class_type": "ToAE",
+    "inputs": {
+      "image": ["1", 0],
+      "mask": ["1", 1],
+      "job_id": "",
+      "filename_prefix": "ae_result",
+      "format": "png"
+    }
+  }
+}

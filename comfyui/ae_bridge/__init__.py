@@ -40,8 +40,9 @@ def _register_routes() -> None:
     """Register /ae_bridge/* routes on ComfyUI's PromptServer, best effort."""
     try:
         from server import PromptServer  # type: ignore
-        from . import routes
+        from . import routes, workflow_registry
         routes.add_routes(PromptServer.instance)
+        workflow_registry.add_routes(PromptServer.instance)
     except Exception:
         # Outside ComfyUI or routes already registered; non-fatal.
         pass

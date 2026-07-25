@@ -1,0 +1,21 @@
+{
+  "1": {
+    "class_type": "FromAEVideo",
+    "inputs": {
+      "job_id": "",
+      "asset_id": "main"
+    }
+  },
+  "2": {
+    "class_type": "ToAEVideo",
+    "inputs": {
+      "image": ["1", 0],
+      "mask": ["1", 1],
+      "job_id": "",
+      "video_meta_json": ["1", 7],
+      "filename_prefix": "ae_video_result",
+      "format_override": "auto",
+      "mov_codec_override": "auto"
+    }
+  }
+}
