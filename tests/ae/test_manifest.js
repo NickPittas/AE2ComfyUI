@@ -46,21 +46,21 @@ assert.strictEqual(m.project_working_space, "HDTV (Rec. 709)");
 assert.strictEqual(m.linear_blending, true);
 assert.ok(m.timeline_end_seconds_exclusive > m.timeline_start_seconds);
 
-// --- video with work area ---
+// --- video always uses the full composition, even with a work area ---
 let ctxWA = Object.assign({}, baseCtx, { has_work_area: true });
 m = AE2CManifest.buildManifest(Object.assign({}, baseOpts, { media_type: "video" }), ctxWA);
-assert.deepStrictEqual(AE2CManifest.validateManifest(m), [], "work-area manifest valid");
-assert.strictEqual(m.range_source, "work_area");
-assert.strictEqual(m.timeline_start_seconds, 2.0);
-assert.strictEqual(m.duration_seconds, 5.0);
-assert.strictEqual(m.frame_count, Math.round(5.0 * ctxWA.fps));
-assert.strictEqual(m.timeline_end_seconds_exclusive, 7.0);
+assert.deepStrictEqual(AE2CManifest.validateManifest(m), [], "full-comp manifest valid");
+assert.strictEqual(m.range_source, "comp");
+assert.strictEqual(m.timeline_start_seconds, 0);
+assert.strictEqual(m.duration_seconds, 20.0);
+assert.strictEqual(m.frame_count, Math.round(20.0 * ctxWA.fps));
+assert.strictEqual(m.timeline_end_seconds_exclusive, 20.0);
 
-// --- video without work area: layer range ---
+// --- selected-layer in/out never crops video transport ---
 m = AE2CManifest.buildManifest(Object.assign({}, baseOpts, { media_type: "video" }), baseCtx);
-assert.strictEqual(m.range_source, "layer_range");
-assert.strictEqual(m.timeline_start_seconds, 3.0);
-assert.strictEqual(m.duration_seconds, 6.0);
+assert.strictEqual(m.range_source, "comp");
+assert.strictEqual(m.timeline_start_seconds, 0);
+assert.strictEqual(m.duration_seconds, 20.0);
 
 // --- video, no layer selected: comp range ---
 let ctxNoLayer = Object.assign({}, baseCtx, {

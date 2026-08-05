@@ -83,6 +83,22 @@ def test_decode_real_png_with_alpha():
     assert float(mask[0, 0, -1]) < 0.1  # alpha 255 -> keep
 
 
+def test_decode_mask_uses_luminance_not_carrier_alpha():
+    from PIL import Image
+    import io
+
+    arr = np.zeros((4, 8, 4), dtype=np.uint8)
+    arr[:, :4, :3] = 255
+    arr[:, :, 3] = 17  # carrier alpha must not affect the mask values
+    buf = io.BytesIO()
+    Image.fromarray(arr, "RGBA").save(buf, format="PNG")
+    mask, w, h = image_io.decode_mask_bytes(buf.getvalue())
+    assert (w, h) == (8, 4)
+    assert mask.shape == (1, 4, 8)
+    assert float(mask[0, 0, 0]) > 0.99
+    assert float(mask[0, 0, -1]) == 0.0
+
+
 def test_png_srgb_icc_embedded_on_request():
     from PIL import Image
     import io

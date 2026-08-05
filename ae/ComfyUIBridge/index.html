@@ -39,6 +39,7 @@
   }
   #status.ok { color: var(--ok); }
   #status.err { color: var(--err); }
+  .hint { color: var(--dim); font-size: 11px; margin: 2px 0 7px 116px; user-select: text; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
          background: var(--err); margin-right: 6px; vertical-align: middle; }
   .dot.on { background: var(--ok); }
@@ -129,8 +130,12 @@
     <div class="row"><label>Staging folder</label><input type="text" id="set-staging"><button id="btn-staging-browse" class="secondary" style="flex:0">…</button></div>
     <div class="row"><label>Result folder</label><input type="text" id="set-result"><button id="btn-result-browse2" class="secondary" style="flex:0">…</button></div>
     <div class="row"><label>Workflow dirs</label><input type="text" id="set-workflowdirs" placeholder="path;path"></div>
-    <div class="row"><label>AME main preset</label><input type="text" id="set-ame-main" placeholder="template name"></div>
-    <div class="row"><label>AME mask preset</label><input type="text" id="set-ame-mask" placeholder="template name"></div>
+    <div class="row"><label>ProRes 4444</label><input type="text" id="set-template-4444" placeholder="AE2C ProRes 4444"></div>
+    <div class="row"><label>ProRes 422 HQ</label><input type="text" id="set-template-422hq" placeholder="AE2C ProRes 422 HQ"></div>
+    <div class="row"><label>H.264 / MP4</label><input type="text" id="set-template-h264" placeholder="AE2C H.264 15 Mbps"></div>
+    <div class="row"><label>Video mask</label><input type="text" id="set-template-mask" placeholder="AE2C H.264 15 Mbps"></div>
+    <div class="hint">Still frames use direct PNG transport; no PNG/JPEG Output Module template is required.</div>
+    <button id="btn-setup-templates" class="action secondary">Setup / audit AE templates</button>
     <button id="btn-save-settings" class="action">Save settings</button>
     <button id="btn-test-conn" class="action secondary">Test connection</button>
     <div id="status-settings"></div>

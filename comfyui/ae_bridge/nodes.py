@@ -40,7 +40,7 @@ def _job_metadata(job_id: str) -> Dict[str, Any]:
 
 
 class FromAE:
-    """Load an AE-uploaded still image (and its alpha as MASK) from a job."""
+    """Load a full-comp AE still and its optional selected-layer mask."""
 
     @staticmethod
     def INPUT_TYPES(cls_dict: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -67,7 +67,20 @@ class FromAE:
             raise RuntimeError(f"FromAE: empty asset file: {path!r}")
         fmt = os.path.splitext(path)[1].lstrip(".")
         image, mask, width, height = image_io.decode_image_bytes(body, fmt)
-        prompt = str(_job_metadata(jid).get("prompt") or "")
+        metadata = _job_metadata(jid)
+        if str(metadata.get("mask_mode") or "none") != "none":
+            mask_path = job_store.get_asset(jid, "mask")
+            with open(mask_path, "rb") as fh:
+                mask_body = fh.read()
+            if not mask_body:
+                raise RuntimeError(f"FromAE: empty mask asset file: {mask_path!r}")
+            mask, mask_width, mask_height = image_io.decode_mask_bytes(mask_body)
+            if (mask_width, mask_height) != (width, height):
+                raise RuntimeError(
+                    "FromAE: mask geometry "
+                    f"{mask_width}x{mask_height} != main {width}x{height}"
+                )
+        prompt = str(metadata.get("prompt") or "")
         return (image, mask, prompt, width, height)
 
     @staticmethod

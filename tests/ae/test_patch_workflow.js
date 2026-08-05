@@ -25,6 +25,19 @@ assert.deepStrictEqual(v.errors, [], "video passthrough valid for video job");
 v = Patch.validateWorkflow({}, "image");
 assert.ok(v.errors.length >= 2, "empty prompt flagged");
 
+v = Patch.validateWorkflow(passthroughImage, "image", "use");
+assert.ok(v.errors.some(e => e.includes("processing/inpaint node")),
+    "mask connected only to ToAE is rejected for masked generation");
+
+const inpaintWorkflow = JSON.parse(JSON.stringify(passthroughImage));
+inpaintWorkflow["3"] = {
+    class_type: "InpaintModelConditioning",
+    inputs: { pixels: ["1", 0], mask: ["1", 1] }
+};
+v = Patch.validateWorkflow(inpaintWorkflow, "image", "use");
+assert.deepStrictEqual(v.errors, [], "mask connected to an inpaint node is accepted");
+assert.ok(v.maskConsumers.some(c => c.class_type === "InpaintModelConditioning"));
+
 // --- patch image workflow ---
 let out = Patch.patchWorkflow(passthroughImage, {
     job_id: "job-xyz", asset_id: "main", prompt_text: "neon",

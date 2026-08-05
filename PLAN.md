@@ -2,8 +2,9 @@
 
 ## Goal
 
-After Effects CEP panel + ComfyUI custom nodes that send a still image (PNG/JPG
-+ alpha) or video (MOV ProRes / MP4 + mask MP4) from AE to ComfyUI, run a
+After Effects CEP panel + ComfyUI custom nodes that send a full-comp still
+(PNG) or full-comp video (MOV ProRes / MP4), plus an optional comp-sized mask
+from the selected layer, from AE to ComfyUI, run a
 user-selected workflow with a prompt and mask mode, and return the result into
 the AE comp at the correct timeline position.
 
@@ -76,21 +77,17 @@ Result is registered in the job store for panel download.
 
 ## Mask convention
 
-ComfyUI MASK: `0 = keep/opaque, 1 = masked/transparent`.
-AE alpha: `1 = opaque, 0 = transparent`. FromAE converts `mask = 1 - alpha`.
-Mask modes in the panel: `none | use | invert`. Inversion happens AE-side
-before export so the exported carrier is already correct.
+ComfyUI MASK: `0 = keep, 1 = process/edit`. The separate carrier is the
+selected layer's masked alpha rendered white-on-black at full-comp geometry.
+Mask modes in the panel: `none | use | invert`. Inversion happens AE-side.
 
 ## Timeline placement
 
 - **Still**: export at current comp time; import result at that same captured
   time (`timeline_start_seconds`), placed above the selected layer or at
   index 1.
-- **Video with active work area**: export
-  `[workAreaStart, workAreaStart + workAreaDuration)`; import anchored at
-  `workAreaStart`; in/out set from returned frame count / fps.
-- **Video without work area**: selected layer's visible in/out range; fall
-  back to comp range.
+- **Video**: always export the full composition interval `[0, compDuration)`;
+  the selected layer affects only mask generation and placement.
 - Import uses the manifest anchor captured at export time, never the playhead
   at completion time.
 
@@ -204,7 +201,7 @@ Manifest fields (exact):
   "width": 0, "height": 0, "pixel_aspect": 1.0,
   "fps": 0, "frame_count": 1, "duration_seconds": 0,
   "timeline_start_seconds": 0, "timeline_end_seconds_exclusive": 0,
-  "range_source": "work_area|layer_range|comp|current_frame",
+  "range_source": "comp|current_frame",
   "video_format": "mov|mp4",
   "mov_codec": "prores_4444|prores_422hq",
   "comp_id": 0, "selected_layer_index": 0,
@@ -220,9 +217,9 @@ Manifest fields (exact):
 ```
 
 ### Task 8: Video export via AME + result import
-`AE2C.exportVideo(optsJSON)`: temp comp restricted to selected layer + range
-(work area > layer in/out > comp range); Render Queue + AME template (MOV
-ProRes 4444 or MP4); second item for mask MP4; `queueInAME()`; poll files.
+`AE2C.exportVideo(optsJSON)`: full composition through Render Queue + AME
+template (MOV ProRes 4444 or MP4); second full-comp-sized item for the selected
+layer mask MP4; `queueInAME()`; poll files.
 `AE2C.importResult(optsJSON)`: importFile; add layer at manifest
 `timeline_start_seconds`; set in/out from returned frame count/fps; above
 selected layer or index 1; label "AE2C Result"; validate dims/fps/frames vs
@@ -260,8 +257,8 @@ mismatch, workflow missing AE nodes, frame-count mismatch, ffmpeg absent);
 
 1. PNG + alpha still → placed above selected layer.
 2. JPG opaque still round trip.
-3. MOV ProRes 4444 + mask MP4, work area 23.976 fps → result starts exactly at
-   work-area start, ≤1-frame duration tolerance.
+3. Full-comp MOV ProRes 4444 + selected-layer mask MP4 at 23.976 fps → matching
+   geometry/frame count and ≤1-frame duration tolerance.
 4. Invert mask → inverted ComfyUI MASK.
 5. Open-tab workflow and saved workflow both listed.
 6. Preserve-working-space round trip shows no visible shift on a test chart.

@@ -38,6 +38,39 @@ def test_from_ae_pulls_image_mask_prompt_geometry():
     assert mask.shape == (1, 4, 8)
 
 
+def test_from_ae_uses_separate_selected_layer_mask():
+    from PIL import Image
+    import numpy as np
+
+    seed_job(job_id="job-mask")
+    job_store.create_job("job-mask", {"prompt": "masked", "mask_mode": "use"})
+    arr = np.zeros((4, 8), dtype=np.uint8)
+    arr[:, :4] = 255
+    path = job_store.job_dir("job-mask") + "/mask.png"
+    Image.fromarray(arr, "L").save(path, format="PNG")
+    job_store.store_asset("job-mask", "mask", path)
+
+    image, mask, prompt, w, h = FromAE().pull("job-mask", "main")
+    assert image.shape == (1, 4, 8, 3)
+    assert (w, h) == (8, 4)
+    assert prompt == "masked"
+    assert float(mask[0, 0, 0]) > 0.99
+    assert float(mask[0, 0, -1]) == 0.0
+
+
+def test_from_ae_rejects_mask_geometry_mismatch():
+    from PIL import Image
+    import numpy as np
+
+    seed_job(job_id="job-mask-size")
+    job_store.create_job("job-mask-size", {"mask_mode": "use"})
+    path = job_store.job_dir("job-mask-size") + "/mask.png"
+    Image.fromarray(np.zeros((2, 2), dtype=np.uint8), "L").save(path, format="PNG")
+    job_store.store_asset("job-mask-size", "mask", path)
+    with pytest.raises(RuntimeError, match="mask geometry"):
+        FromAE().pull("job-mask-size", "main")
+
+
 def test_from_ae_empty_job_id_raises():
     with pytest.raises(RuntimeError, match="job_id"):
         FromAE().pull("", "main")

@@ -13,31 +13,202 @@
 
     // --- host bridge -------------------------------------------------------
 
-    function evalScriptAsync(script) {
-        return new Promise(function (resolve, reject) {
-            function done(raw) {
-                var data;
-                try { data = JSON.parse(raw); }
-                catch (e) { return reject(new Error("bad host response: " + String(raw).slice(0, 200))); }
-                if (data && data.ok) return resolve(data);
-                reject(new Error((data && data.error) || "host call failed"));
-            }
+    var HOST_RESPONSE_TIMEOUT_MS = 10 * 60 * 1000;
+
+    function readTextFile(path) {
+        var fs = nodeFs();
+        if (fs) return fs.readFileSync(path, "utf8");
+        var result = window.cep.fs.readFile(path);
+        if (result.err !== 0) throw new Error("cannot read " + path + " (CEP error " + result.err + ")");
+        return result.data;
+    }
+
+    function writeTextFile(path, text) {
+        var fs = nodeFs();
+        if (fs) return fs.writeFileSync(path, text, "utf8");
+        var result = window.cep.fs.writeFile(path, text);
+        if (result.err !== 0) throw new Error("cannot write " + path + " (CEP error " + result.err + ")");
+    }
+
+    function deleteFile(path) {
+        var fs = nodeFs();
+        if (fs) {
+            if (fs.existsSync(path)) fs.unlinkSync(path);
+            return;
+        }
+        if (window.cep && window.cep.fs && window.cep.fs.deleteFile) {
+            window.cep.fs.deleteFile(path);
+        }
+    }
+
+    function bridgeFolder() {
+        var configured = "";
+        try {
+            configured = String(Settings.get("stagingFolder") || "").trim();
+            if (!configured) configured = String(Settings.get("resultFolder") || "").trim();
+        } catch (e) { /* Settings is unavailable only in isolated tests. */ }
+        if (configured) return configured;
+        var root = extensionRoot();
+        return root ? pathJoin(root, ".ae2c-runtime") : "";
+    }
+
+    function panelLogPath() {
+        var folder = bridgeFolder();
+        return folder ? pathJoin(folder, "ae2comfyui-panel.log") : "";
+    }
+
+    function panelLog(event, detail) {
+        var line = new Date().toISOString() + " [" + event + "]";
+        if (detail !== undefined && detail !== null && detail !== "") line += " " + String(detail);
+        try {
+            if (typeof console !== "undefined" && console.log) console.log("AE2ComfyUI " + line);
+        } catch (ignored) {}
+        try {
+            var path = panelLogPath();
+            if (!path) return;
+            ensureDir(bridgeFolder());
+            var previous = fileExists(path) ? readTextFile(path) : "";
+            if (previous.length > 250000) previous = previous.slice(-200000);
+            writeTextFile(path, previous + line + "\n");
+        } catch (ignoredWriteError) {
             try {
-                if (typeof CSInterface !== "undefined") {
-                    new CSInterface().evalScript(script, done);
-                } else if (window.__adobe_cep__ && window.__adobe_cep__.evalScript) {
-                    window.__adobe_cep__.evalScript(script, done);
-                } else {
-                    reject(new Error("CEP host bridge unavailable"));
+                if (typeof console !== "undefined" && console.error) {
+                    console.error("AE2ComfyUI could not write panel log", ignoredWriteError);
                 }
+            } catch (ignoredConsoleError) {}
+        }
+    }
+
+    function parseHostResponse(raw, label) {
+        var data;
+        try { data = JSON.parse(raw); }
+        catch (e) {
+            var prefix = label ? label + " returned" : "AE host returned";
+            var value = String(raw || "<empty>").slice(0, 500);
+            throw new Error(prefix + " an invalid response: " + value);
+        }
+        if (data && data.ok) return data;
+        throw new Error((data && data.error) || "host call failed");
+    }
+
+    function submitEvalScript(script, label, callback) {
+        panelLog("HOST SUBMIT", label || "unnamed call");
+        if (typeof CSInterface !== "undefined") {
+            new CSInterface().evalScript(script, callback);
+        } else if (window.__adobe_cep__ && window.__adobe_cep__.evalScript) {
+            window.__adobe_cep__.evalScript(script, callback);
+        } else {
+            throw new Error("CEP host bridge unavailable");
+        }
+    }
+
+    /*
+     * AE 26 / CEP 12 can execute evalScript while delivering an empty callback.
+     * Have ExtendScript write its result to a unique file and read that file from
+     * CEP. The callback remains useful for diagnostics, but is not trusted as the
+     * data channel.
+     */
+    function evalScriptAsync(script, label) {
+        return new Promise(function (resolve, reject) {
+            var folder = bridgeFolder();
+            if (!folder) return reject(new Error("set a staging folder before calling the AE host"));
+            ensureDir(folder);
+            var responsePath = pathJoin(folder, ".ae2c-host-response-" + uuid() + ".json");
+            var responseLiteral = JSON.stringify(responsePath);
+            var wrapped = "(function(){" +
+                "var __ae2cResult;" +
+                "try{__ae2cResult=(" + script + ");}" +
+                "catch(__ae2cError){__ae2cResult=JSON.stringify({ok:false,error:'ExtendScript error: '+__ae2cError.toString(),line:__ae2cError.line||0,file:__ae2cError.fileName||''});}" +
+                "var __ae2cFile=new File(" + responseLiteral + ");" +
+                "__ae2cFile.encoding='UTF-8';" +
+                "if(__ae2cFile.open('w')){__ae2cFile.write(String(__ae2cResult));__ae2cFile.close();}" +
+                "return __ae2cResult;" +
+                "}())";
+            var started = Date.now();
+            var settled = false;
+
+            function fail(error) {
+                if (settled) return;
+                settled = true;
+                deleteFile(responsePath);
+                panelLog("HOST ERROR", (label || "unnamed call") + ": " + error.message);
+                reject(error);
+            }
+
+            function pollResponse() {
+                if (settled) return;
+                try {
+                    if (fileExists(responsePath)) {
+                        var raw = readTextFile(responsePath);
+                        deleteFile(responsePath);
+                        settled = true;
+                        panelLog("HOST FILE RESPONSE", (label || "unnamed call") +
+                            " bytes=" + raw.length + " value=" + String(raw).slice(0, 500));
+                        try { resolve(parseHostResponse(raw, label)); }
+                        catch (parseError) { reject(parseError); }
+                        return;
+                    }
+                } catch (readError) {
+                    return fail(readError);
+                }
+                if (Date.now() - started >= HOST_RESPONSE_TIMEOUT_MS) {
+                    return fail(new Error((label || "AE host") +
+                        " timed out without creating " + responsePath));
+                }
+                setTimeout(pollResponse, 50);
+            }
+
+            try {
+                submitEvalScript(wrapped, label, function (raw) {
+                    panelLog("HOST CALLBACK", (label || "unnamed call") +
+                        " type=" + typeof raw + " bytes=" + String(raw || "").length +
+                        " value=" + String(raw || "<empty>").slice(0, 500));
+                    pollResponse();
+                });
+                setTimeout(pollResponse, 0);
             } catch (e) {
-                reject(e);
+                fail(e);
             }
         });
     }
 
+    var hostReadyPromise = null;
+
+    function extensionRoot() {
+        if (window.__adobe_cep__ &&
+            typeof window.__adobe_cep__.getSystemPath === "function") {
+            var root = window.__adobe_cep__.getSystemPath("extension");
+            try { return decodeURI(root); } catch (e) { return root; }
+        }
+        return "";
+    }
+
+    function bootstrapHost() {
+        var root = extensionRoot();
+        if (!root) return Promise.reject(new Error("cannot resolve CEP extension root"));
+        var hostPath = pathJoin(root, "jsx/host.jsx");
+        var script = "(function(){try{$.evalFile(new File(" + JSON.stringify(hostPath) + "));" +
+            "return typeof AE2C !== 'undefined' ? '{\"ok\":true,\"loaded\":true}' : " +
+            "'{\"ok\":false,\"error\":\"AE2C unavailable\"}';" +
+            "}catch(e){return JSON.stringify({ok:false,error:'host bootstrap failed: '+e.toString(),line:e.line||0});}}())";
+        return evalScriptAsync(script, "AE host bootstrap").then(function (result) {
+            if (!result.loaded) throw new Error("AE host script loaded but AE2C is unavailable");
+            return result;
+        });
+    }
+
+    function ensureHost() {
+        if (!hostReadyPromise) {
+            hostReadyPromise = bootstrapHost();
+            hostReadyPromise.catch(function () { hostReadyPromise = null; });
+        }
+        return hostReadyPromise;
+    }
+
     function hostCall(expr) {
-        return evalScriptAsync("AE2C." + expr);
+        return ensureHost().then(function () {
+            return evalScriptAsync("AE2C." + expr, "AE2C." + expr.split("(")[0]);
+        });
     }
 
     // --- local file helpers (Node in CEP, cep.fs fallback) ------------------
@@ -92,8 +263,9 @@
     }
 
     function browseFolder(input) {
+        if (typeof window.cep === "undefined" || !window.cep.fs) return;
         try {
-            var res = window.cep.util.showOpenDialogEx(false, true, "Choose folder", "", []);
+            var res = window.cep.fs.showOpenDialogEx(false, true, "Choose folder", "", []);
             if (res.err === 0 && res.data && res.data.length) input.value = res.data[0];
         } catch (e) { /* dialog unavailable (tests) */ }
     }
@@ -132,7 +304,10 @@
     var SETTING_FIELDS = {
         "set-host": "host", "set-port": "port", "set-staging": "stagingFolder",
         "set-result": "resultFolder", "set-workflowdirs": "workflowDirs",
-        "set-ame-main": "ameMainTemplate", "set-ame-mask": "ameMaskTemplate"
+        "set-template-4444": "prores4444Template",
+        "set-template-422hq": "prores422hqTemplate",
+        "set-template-h264": "h264Template",
+        "set-template-mask": "maskTemplate"
     };
 
     function loadSettings() {
@@ -154,7 +329,8 @@
         Settings.set("movCodec", vf === "mov422" ? "prores_422hq" : "prores_4444");
         Settings.set("colorMode", $("color-mode").value);
         Settings.set("placement", $("placement").value);
-        Settings.set("resultFolder", $("result-folder").value);
+        var rf = $("result-folder").value.trim();
+        if (rf) Settings.set("resultFolder", rf);
     }
 
     function saveSettings() {
@@ -162,8 +338,49 @@
             Settings.set(SETTING_FIELDS[id], $(id).value);
         });
         persistGenerateChoices();
+        // Keep the Generate-tab result-folder field in sync with the
+        // authoritative Settings value (persistGenerateChoices skips blanks).
+        $("result-folder").value = Settings.get("resultFolder");
         setStatus($("status-settings"), "Settings saved.", "ok");
         checkConnection();
+    }
+
+    function formatTemplateSetup(result) {
+        function names(items) {
+            return items.map(function (item) { return item.name; }).join(", ");
+        }
+        var lines = [];
+        if (result.created && result.created.length) {
+            lines.push("Created: " + names(result.created));
+        }
+        if (result.ready && result.ready.length) {
+            lines.push("Already ready: " + names(result.ready));
+        }
+        if (result.missing && result.missing.length) {
+            lines.push("Missing: " + names(result.missing));
+            lines.push("For AE2C ProRes 422 HQ: Edit > Templates > Output Module > New; " +
+                "Format QuickTime; Format Options Apple ProRes 422 HQ; Channels RGB; " +
+                "save exactly as 'AE2C ProRes 422 HQ', then run this audit again.");
+        }
+        lines.push("PNG/JPG still transport: no AE template required.");
+        return lines.join("\n");
+    }
+
+    function setupTemplates() {
+        var statusEl = $("status-settings");
+        setStatus(statusEl, "Inspecting AE Output Module templates…");
+        return hostCall("setupTemplatesJSON()")
+            .then(function (result) {
+                var hasMissing = result.missing && result.missing.length;
+                setStatus(statusEl, formatTemplateSetup(result), hasMissing ? "err" : "ok");
+                return result;
+            })
+            .catch(function (e) {
+                var logHint = panelLogPath();
+                setStatus(statusEl, "Template setup failed: " + e.message +
+                    (logHint ? "\nLog: " + logHint : ""), "err");
+                throw e;
+            });
     }
 
     // --- Connection + workflows --------------------------------------------
@@ -231,6 +448,9 @@
 
     function gatherChoices() {
         var vf = $("video-format").value;
+        var videoTemplate = vf === "mp4" ? Settings.get("h264Template")
+            : (vf === "mov422" ? Settings.get("prores422hqTemplate")
+                               : Settings.get("prores4444Template"));
         return {
             job_id: uuid(),
             media_type: $("media-type").value,
@@ -242,8 +462,8 @@
             placement: $("placement").value,
             prompt: $("prompt").value,
             staging_folder: Settings.get("stagingFolder"),
-            ame_main_template: Settings.get("ameMainTemplate"),
-            ame_mask_template: Settings.get("ameMaskTemplate")
+            ame_main_template: videoTemplate,
+            ame_mask_template: Settings.get("maskTemplate")
         };
     }
 
@@ -291,7 +511,7 @@
         var choices, workflowId, manifest, exportResult, client;
         try {
             choices = gatherChoices();
-            choices.resultFolder = $("result-folder").value || Settings.get("resultFolder");
+            choices.resultFolder = $("result-folder").value.trim() || Settings.get("resultFolder");
             workflowId = validateChoices(choices);
             pollWorkflowCompat(workflowId, choices.media_type);
         } catch (e) {
@@ -345,7 +565,9 @@
                 return client.getWorkflowPrompt(workflowId);
             })
             .then(function (wf) {
-                var check = AE2CPatch.validateWorkflow(wf.prompt, choices.media_type);
+                var check = AE2CPatch.validateWorkflow(
+                    wf.prompt, choices.media_type, choices.mask_mode
+                );
                 if (check.errors.length) throw new Error(check.errors.join("; "));
                 var patched = AE2CPatch.patchWorkflow(wf.prompt, {
                     job_id: choices.job_id,
@@ -390,7 +612,10 @@
             })
             .catch(function (e) {
                 var msg = (e && e.message) || String(e);
-                setStatus(statusEl, msg === "cancelled" ? "Cancelled." : "Error: " + msg,
+                panelLog("GENERATE ERROR", msg);
+                var logHint = panelLogPath();
+                setStatus(statusEl, msg === "cancelled" ? "Cancelled." : "Error: " + msg +
+                    (logHint ? "\nLog: " + logHint : ""),
                     msg === "cancelled" ? "" : "err");
             })
             .finally(function () {
@@ -412,6 +637,9 @@
         $("tab-generate").addEventListener("click", function () { showTab("generate"); });
         $("tab-settings").addEventListener("click", function () { showTab("settings"); });
         $("btn-save-settings").addEventListener("click", saveSettings);
+        $("btn-setup-templates").addEventListener("click", function () {
+            setupTemplates().catch(function () {});
+        });
         $("btn-test-conn").addEventListener("click", function () {
             checkConnection().then(function (ok) {
                 setStatus($("status-settings"),
@@ -439,10 +667,32 @@
         });
 
         loadSettings();
+        panelLog("PANEL INIT", "extension=" + extensionRoot() + " log=" + panelLogPath());
         syncMediaRows();
         checkConnection();
         refreshWorkflows();
     }
 
-    document.addEventListener("DOMContentLoaded", init);
+    // Skip bootstrap in Node test environments (no DOM).
+    if (typeof document !== "undefined" && typeof window !== "undefined") {
+        document.addEventListener("DOMContentLoaded", init);
+    }
+
+    // --- Node test exports ------------------------------------------------
+    if (typeof module !== "undefined" && module.exports) {
+        module.exports = {
+            browseFolder: browseFolder,
+            persistGenerateChoices: persistGenerateChoices,
+            saveSettings: saveSettings,
+            formatTemplateSetup: formatTemplateSetup,
+            gatherChoices: gatherChoices,
+            validateChoices: validateChoices,
+            extensionRoot: extensionRoot,
+            bootstrapHost: bootstrapHost,
+            ensureHost: ensureHost,
+            hostCall: hostCall,
+            panelLogPath: panelLogPath,
+            resetHostForTests: function () { hostReadyPromise = null; }
+        };
+    }
 })();

@@ -17,6 +17,10 @@ assert.strictEqual(Settings.get("imageFormat"), "png", "default image format");
 assert.strictEqual(Settings.get("movCodec"), "prores_4444", "default mov codec");
 assert.strictEqual(Settings.get("colorMode"), "preserve_working_space");
 assert.strictEqual(Settings.get("placement"), "above_selected_layer");
+assert.strictEqual(Settings.get("prores4444Template"), "AE2C ProRes 4444");
+assert.strictEqual(Settings.get("prores422hqTemplate"), "AE2C ProRes 422 HQ");
+assert.strictEqual(Settings.get("h264Template"), "AE2C H.264 15 Mbps");
+assert.strictEqual(Settings.get("maskTemplate"), "AE2C H.264 15 Mbps");
 
 Settings.set("stagingFolder", "/tmp/stage");
 const all = Settings.all();

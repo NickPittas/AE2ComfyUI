@@ -145,7 +145,7 @@ Written by AE into the staging folder and uploaded with every asset.
   "fps": 0.0, "frame_count": 1, "duration_seconds": 0.0,
   "timeline_start_seconds": 0.0,
   "timeline_end_seconds_exclusive": 0.0,
-  "range_source": "work_area | layer_range | comp | current_frame",
+  "range_source": "comp | current_frame",
   "video_format": "mov | mp4",
   "mov_codec": "prores_4444 | prores_422hq",
   "comp_id": 0, "selected_layer_index": 0,
@@ -165,9 +165,10 @@ Written by AE into the staging folder and uploaded with every asset.
 
 ## Mask convention
 
-ComfyUI MASK: `0 = keep/opaque, 1 = masked/transparent`.
-AE alpha: `1 = opaque, 0 = transparent`. `FromAE` converts `mask = 1 - alpha`.
-`invert` mode is applied AE-side before export.
+ComfyUI MASK: `0 = keep, 1 = process/edit`.
+The main asset is always the full comp. The separate mask asset is the selected
+layer's resulting alpha after AE masks, rendered as white (`1`) on black (`0`)
+at full-comp dimensions and duration. `invert` is applied AE-side before export.
 
 ## Result import (AE side)
 

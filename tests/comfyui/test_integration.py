@@ -42,7 +42,9 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
         source = torch.rand((1, 4, 8, 3), dtype=torch.float32)
         mask = torch.zeros((1, 4, 8), dtype=torch.float32)
         mask[0, :, :4] = 1.0
-        png, _, _ = image_io.encode_image_bytes(source, "png", mask)
+        png, _, _ = image_io.encode_image_bytes(source, "png")
+        mask_rgb = mask.unsqueeze(-1).repeat(1, 1, 1, 3)
+        mask_png, _, _ = image_io.encode_image_bytes(mask_rgb, "png")
 
         async with make_client() as client:
             # 1. Panel uploads the rendered still + manifest.
@@ -52,6 +54,16 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
             form.add_field("metadata", json.dumps(manifest))
             form.add_field("file", png, filename="main.png", content_type="image/png")
             resp = await client.post("/ae_bridge/assets", data=form)
+            self.assertEqual(resp.status, 200)
+
+            mask_form = FormData()
+            mask_form.add_field("job_id", "job-e2e")
+            mask_form.add_field("asset_id", "mask")
+            mask_form.add_field("metadata", json.dumps(manifest))
+            mask_form.add_field(
+                "file", mask_png, filename="mask.png", content_type="image/png"
+            )
+            resp = await client.post("/ae_bridge/assets", data=mask_form)
             self.assertEqual(resp.status, 200)
 
             # 2. Workflow executes FromAE -> (process) -> ToAE.

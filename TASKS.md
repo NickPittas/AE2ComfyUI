@@ -27,8 +27,8 @@ Track per-task status. See `PLAN.md` for detail, `PROTOCOL.md` for contracts.
 
 - [ ] PNG + alpha still → placed above selected layer
 - [ ] JPG opaque still round trip
-- [ ] MOV ProRes 4444 + mask MP4; work area 23.976 fps → result starts exactly
-      at work-area start (≤1 frame duration tolerance)
+- [ ] Full-comp MOV ProRes 4444 + selected-layer mask MP4 at 23.976 fps →
+      matching geometry/frame count (≤1 frame duration tolerance)
 - [ ] Invert mask → inverted ComfyUI MASK
 - [ ] Open-tab workflow + saved workflow both listed
 - [ ] Preserve-working-space round trip: no visible shift on test chart

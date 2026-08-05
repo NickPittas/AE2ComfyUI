@@ -31,7 +31,28 @@
         return ids;
     }
 
-    function validateWorkflow(prompt, mediaType) {
+    function outputConsumers(prompt, sourceIds, outputIndex) {
+        var consumers = [];
+        for (var id in prompt) {
+            var node = prompt[id];
+            if (!node || !node.inputs) continue;
+            for (var inputName in node.inputs) {
+                var value = node.inputs[inputName];
+                if (!isLink(value) || value.length < 2) continue;
+                if (sourceIds.indexOf(String(value[0])) !== -1 &&
+                        Number(value[1]) === outputIndex) {
+                    consumers.push({
+                        id: id,
+                        class_type: node.class_type || "",
+                        input: inputName
+                    });
+                }
+            }
+        }
+        return consumers;
+    }
+
+    function validateWorkflow(prompt, mediaType, maskMode) {
         var errors = [];
         if (!prompt || typeof prompt !== "object") {
             return { errors: ["workflow has no prompt graph"] };
@@ -56,7 +77,27 @@
                 errors.push("image job requires a ToAE node");
             }
         }
-        return { errors: errors, fromIds: fromIds, toIds: toIds };
+
+        var mediaFromIds = mediaType === "video"
+            ? nodeIdsOfType(prompt, [FROM_VIDEO])
+            : nodeIdsOfType(prompt, [FROM_IMAGE]);
+        var maskConsumers = outputConsumers(prompt, mediaFromIds, 1);
+        if (maskMode && maskMode !== "none") {
+            var processingMaskConsumers = maskConsumers.filter(function (consumer) {
+                return TO_TYPES.indexOf(consumer.class_type) === -1;
+            });
+            if (!processingMaskConsumers.length) {
+                errors.push("mask is enabled, but the From AE mask output is not " +
+                    "connected to a processing/inpaint node (a To AE connection alone " +
+                    "does not constrain generation)");
+            }
+        }
+        return {
+            errors: errors,
+            fromIds: fromIds,
+            toIds: toIds,
+            maskConsumers: maskConsumers
+        };
     }
 
     function _setScalar(inputs, key, value) {
@@ -106,6 +147,7 @@
         TO_TYPES: TO_TYPES,
         isLink: isLink,
         nodeIdsOfType: nodeIdsOfType,
+        outputConsumers: outputConsumers,
         validateWorkflow: validateWorkflow,
         patchWorkflow: patchWorkflow
     };

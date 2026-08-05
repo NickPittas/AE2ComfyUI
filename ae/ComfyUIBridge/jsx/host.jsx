@@ -10,6 +10,12 @@
  * throws across the evalScript boundary.
  */
 
+// ExtendScript does not guarantee a global JSON object in fresh AE sessions.
+// Keep the host bridge self-contained instead of relying on another panel to
+// have installed Adobe's JSON global.
+#include "json2.js"
+#include "manifest.jsx"
+
 var AE2C = (function () {
     "use strict";
 
@@ -28,6 +34,16 @@ var AE2C = (function () {
 
     function _err(msg) {
         return JSON.stringify({ ok: false, error: String(msg) });
+    }
+
+    function _errorText(error) {
+        var text = "unknown ExtendScript error";
+        try { text = error.toString(); } catch (ignored) {}
+        try {
+            if (error.fileName) text += " in " + error.fileName;
+            if (error.line) text += " at line " + error.line;
+        } catch (ignoredDetails) {}
+        return text;
     }
 
     function _activeComp() {
@@ -145,7 +161,7 @@ var AE2C = (function () {
                 color: color
             });
         } catch (e) {
-            return _err("getContext failed: " + e);
+            return _err("getContext failed: " + _errorText(e));
         }
     }
 
@@ -214,32 +230,43 @@ var AE2C = (function () {
         }
     }
 
+    function _waitForCompletedFile(path, timeoutMs) {
+        var deadline = new Date().getTime() + timeoutMs;
+        var lastSize = -1;
+        var stableChecks = 0;
+        while (new Date().getTime() < deadline) {
+            var candidate = new File(path);
+            if (candidate.exists && candidate.length > 0) {
+                if (candidate.length === lastSize) stableChecks++;
+                else stableChecks = 0;
+                lastSize = candidate.length;
+                if (stableChecks >= 2) return candidate.fsName;
+            }
+            $.sleep(50);
+        }
+        throw new Error("frame render did not finish: " + path);
+    }
+
     function _renderStillToFile(comp, time, folder, baseName, imageFormat, manifest) {
-        var rq = app.project.renderQueue;
-        var item = null;
         var savedTime = comp.time;
-        var colorApplied = false;
+        var outPath = _join(folder, baseName + ".png");
+        var outFile = new File(outPath);
         try {
+            // PNG/JPEG output-module templates are user-installation dependent;
+            // AE 26's default templates often contain neither. saveFrameToPng
+            // is template-independent and preserves alpha for ComfyUI masks.
+            if (outFile.exists && !outFile.remove()) {
+                throw new Error("cannot replace still frame: " + outPath);
+            }
             comp.time = time;
-            item = _newRenderItem(comp);
-            item.timeSpanStart = time;
-            item.timeSpanDuration = 1 / comp.frameRate;
-            var om = item.outputModule(1);
-            _applyStillFormat(om, imageFormat);
-            if (manifest) colorApplied = _applyColorSettings(om, manifest);
-            _setSingleFrameSequencePath(om, folder, baseName + "_[#####]");
-            rq.render();
-            var found = _findRenderedFile(
-                folder, baseName + "_",
-                (imageFormat === "jpg") ? [".jpg", ".jpeg"] : [".png"]
-            );
-            if (!found) throw new Error("render produced no file for " + baseName);
-            return { path: found, color_applied: colorApplied };
+            comp.saveFrameToPng(time, outFile);
+            return {
+                path: _waitForCompletedFile(outPath, 30000),
+                color_applied: false,
+                transport_format: "png"
+            };
         } finally {
             comp.time = savedTime;
-            if (item) {
-                try { item.remove(); } catch (e) {}
-            }
         }
     }
 
@@ -251,6 +278,7 @@ var AE2C = (function () {
             comp.duration, comp.frameRate
         );
         try {
+            try { maskComp.displayStartTime = comp.displayStartTime; } catch (ignored) {}
             // Solid black background.
             var bg = maskComp.layers.addSolid(
                 [0, 0, 0], "ae2c_bg", comp.width, comp.height,
@@ -263,15 +291,23 @@ var AE2C = (function () {
                 comp.pixelAspect, comp.duration
             );
             layer.copyToComp(maskComp);
-            var matte = maskComp.layer(maskComp.numLayers);
-            white.moveBefore(matte);
+            // copyToComp inserts the copied source at the top. Keep the
+            // opaque black solid at the bottom; moving it to the beginning
+            // covered the entire matte and produced a uniform black mask.
+            var matte = maskComp.layer(1);
+            bg.moveToEnd();
             try {
-                white.trackMatteType = invert ? TrackMatteType.ALPHA_INVERTED
-                                              : TrackMatteType.ALPHA;
+                var matteType = invert ? TrackMatteType.ALPHA_INVERTED
+                                       : TrackMatteType.ALPHA;
+                if (typeof white.setTrackMatte === "function") {
+                    white.setTrackMatte(matte, matteType);
+                } else {
+                    matte.moveBefore(white);
+                    white.trackMatteType = matteType;
+                }
             } catch (e) {
-                throw new Error("track matte setup failed: " + e);
+                throw new Error("track matte setup failed: " + _errorText(e));
             }
-            bg.moveToBeginning();
             return maskComp;
         } catch (e) {
             try { maskComp.remove(); } catch (e2) {}
@@ -297,9 +333,8 @@ var AE2C = (function () {
             var jobDir = _join(opts.staging_folder, manifest.job_id);
             _ensureFolder(jobDir);
 
-            var fmt = (opts.image_format === "jpg") ? "jpg" : "png";
             var main = _renderStillToFile(
-                comp, ctx.current_time, jobDir, "main", fmt, manifest
+                comp, ctx.current_time, jobDir, "main", "png", manifest
             );
             var mainPath = main.path;
             var colorApplied = main.color_applied;
@@ -330,7 +365,7 @@ var AE2C = (function () {
                 color_applied: colorApplied
             });
         } catch (e) {
-            return _err("exportStill failed: " + e);
+            return _err("exportStill failed: " + _errorText(e));
         } finally {
             if (maskComp) {
                 try { maskComp.remove(); } catch (e) {}
@@ -352,14 +387,109 @@ var AE2C = (function () {
     // whether transferred items stay in the AE queue afterwards.
     var _videoJobs = {};
 
-    var TEMPLATE_CANDIDATES = {
-        prores_4444: ["Apple ProRes 4444", "ProRes 4444", "Lossless with Alpha"],
-        prores_422hq: ["Apple ProRes 422 HQ", "ProRes 422 HQ"],
-        mp4: ["H.264 - Match Render Settings - High Quality", "H.264"]
+    var AE2C_TEMPLATE_NAMES = {
+        prores_4444: "AE2C ProRes 4444",
+        prores_422hq: "AE2C ProRes 422 HQ",
+        mp4: "AE2C H.264 15 Mbps"
     };
 
+    var TEMPLATE_CANDIDATES = {
+        prores_4444: [
+            AE2C_TEMPLATE_NAMES.prores_4444,
+            "Apple ProRes 4444", "ProRes 4444", "High Quality with Alpha"
+        ],
+        prores_422hq: [
+            AE2C_TEMPLATE_NAMES.prores_422hq,
+            "Apple ProRes 422 HQ", "ProRes 422 HQ"
+        ],
+        mp4: [
+            AE2C_TEMPLATE_NAMES.mp4,
+            "H.264 - Match Render Settings - 15 Mbps",
+            "H.264 - Match Render Settings - 40 Mbps",
+            "H.264 - Match Render Settings -  5 Mbps"
+        ]
+    };
+
+    function _templateExists(templates, name) {
+        for (var i = 0; i < templates.length; i++) {
+            if (templates[i] === name) return true;
+        }
+        return false;
+    }
+
+    function _findTemplate(templates, names) {
+        for (var n = 0; n < names.length; n++) {
+            if (_templateExists(templates, names[n])) return names[n];
+        }
+        return "";
+    }
+
+    function _ensureTemplateAlias(om, alias, sourceCandidates) {
+        var available = om.templates;
+        if (_templateExists(available, alias)) {
+            return { name: alias, state: "ready", source: alias };
+        }
+        var source = _findTemplate(available, sourceCandidates);
+        if (!source) {
+            return {
+                name: alias,
+                state: "missing",
+                sources_checked: sourceCandidates
+            };
+        }
+        om.applyTemplate(source);
+        om.saveAsTemplate(alias);
+        return { name: alias, state: "created", source: source };
+    }
+
+    function setupTemplatesJSON() {
+        var item = null;
+        try {
+            var comp = _activeComp();
+            if (!comp) return _err("open or select a composition before setting up templates");
+            item = _newRenderItem(comp);
+            var om = item.outputModule(1);
+            var results = [
+                _ensureTemplateAlias(om, AE2C_TEMPLATE_NAMES.prores_4444, [
+                    "Apple ProRes 4444", "ProRes 4444", "High Quality with Alpha"
+                ]),
+                _ensureTemplateAlias(om, AE2C_TEMPLATE_NAMES.prores_422hq, [
+                    "Apple ProRes 422 HQ", "ProRes 422 HQ"
+                ]),
+                _ensureTemplateAlias(om, AE2C_TEMPLATE_NAMES.mp4, [
+                    "H.264 - Match Render Settings - 15 Mbps",
+                    "H.264 - Match Render Settings - 40 Mbps",
+                    "H.264 - Match Render Settings -  5 Mbps"
+                ])
+            ];
+            var ready = [], created = [], missing = [];
+            for (var i = 0; i < results.length; i++) {
+                if (results[i].state === "created") created.push(results[i]);
+                else if (results[i].state === "ready") ready.push(results[i]);
+                else missing.push(results[i]);
+            }
+            return JSON.stringify({
+                ok: true,
+                ready: ready,
+                created: created,
+                missing: missing,
+                still_transport: "PNG (no Output Module template required)"
+            });
+        } catch (e) {
+            return _err("template setup failed: " + _errorText(e));
+        } finally {
+            if (item) {
+                try { item.remove(); } catch (ignored) {}
+            }
+        }
+    }
+
     function _applyTemplateByName(om, overrideName, candidates) {
-        var wanted = overrideName ? [overrideName] : candidates;
+        var wanted = [];
+        if (overrideName) wanted.push(overrideName);
+        for (var c = 0; c < candidates.length; c++) {
+            if (!_templateExists(wanted, candidates[c])) wanted.push(candidates[c]);
+        }
         var available = om.templates;
         for (var w = 0; w < wanted.length; w++) {
             for (var i = 0; i < available.length; i++) {
@@ -374,12 +504,6 @@ var AE2C = (function () {
             " — configure AME template names in Settings. Available: " +
             available.join(", ")
         );
-    }
-
-    function _soloOnly(comp, layer, on) {
-        try {
-            if (layer.solo !== undefined) layer.solo = on;
-        } catch (e) { /* non-soloable layer type */ }
     }
 
     function _queueVideoRender(comp, start, duration, outPath, templateOverride, candidates, manifest) {
@@ -442,31 +566,27 @@ var AE2C = (function () {
             var start = manifest.timeline_start_seconds;
             var dur = manifest.duration_seconds;
 
-            // Solo the selected layer so the export carries only that layer.
-            _soloOnly(comp, layer, true);
             var colorApplied = false;
-            try {
-                var candidates = (fmt === "mp4")
-                    ? TEMPLATE_CANDIDATES.mp4
-                    : TEMPLATE_CANDIDATES[manifest.mov_codec];
-                colorApplied = _queueVideoRender(comp, start, dur, mainPath,
-                    opts.ame_main_template || "", candidates, manifest);
+            // Main transport is the complete composition. Selection affects
+            // only the independently rendered mask and result placement.
+            var candidates = (fmt === "mp4")
+                ? TEMPLATE_CANDIDATES.mp4
+                : TEMPLATE_CANDIDATES[manifest.mov_codec];
+            colorApplied = _queueVideoRender(comp, start, dur, mainPath,
+                opts.ame_main_template || "", candidates, manifest);
 
-                if (maskPath) {
-                    maskComp = _buildMaskComp(
-                        comp, layer, manifest.mask_mode === "invert",
-                        "AE2C Mask " + manifest.job_id
-                    );
-                    maskComp.duration = dur;
-                    // Masks are data: always preserve RGB.
-                    var maskManifest = JSON.parse(JSON.stringify(manifest));
-                    maskManifest.bridge_color_mode = "preserve_rgb";
-                    _queueVideoRender(maskComp, 0, dur, maskPath,
-                        opts.ame_mask_template || "", TEMPLATE_CANDIDATES.mp4,
-                        maskManifest);
-                }
-            } finally {
-                _soloOnly(comp, layer, false);
+            if (maskPath) {
+                maskComp = _buildMaskComp(
+                    comp, layer, manifest.mask_mode === "invert",
+                    "AE2C Mask " + manifest.job_id
+                );
+                // Render the same comp-space interval as the main video. The
+                // mask comp retains the source comp duration and layer timing.
+                var maskManifest = JSON.parse(JSON.stringify(manifest));
+                maskManifest.bridge_color_mode = "preserve_rgb";
+                _queueVideoRender(maskComp, start, dur, maskPath,
+                    opts.ame_mask_template || "", TEMPLATE_CANDIDATES.mp4,
+                    maskManifest);
             }
 
             var manifestPath = _join(jobDir, "job_manifest.json");
@@ -490,7 +610,7 @@ var AE2C = (function () {
                 color_applied: colorApplied
             });
         } catch (e) {
-            return _err("exportVideo failed: " + e);
+            return _err("exportVideo failed: " + _errorText(e));
         } finally {
             if (maskComp) {
                 try { maskComp.remove(); } catch (e) {}
@@ -526,7 +646,7 @@ var AE2C = (function () {
                 elapsed_ms: new Date().getTime() - job.started
             });
         } catch (e) {
-            return _err("exportVideoStatus failed: " + e);
+            return _err("exportVideoStatus failed: " + _errorText(e));
         }
     }
 
@@ -539,7 +659,7 @@ var AE2C = (function () {
             delete _videoJobs[opts.job_id];
             return JSON.stringify({ ok: true, cancelled: existed });
         } catch (e) {
-            return _err("cancelVideo failed: " + e);
+            return _err("cancelVideo failed: " + _errorText(e));
         }
     }
 
@@ -571,6 +691,16 @@ var AE2C = (function () {
             var comp = _findCompById(manifest.comp_id);
             if (!comp) return _err("composition no longer exists (id " + manifest.comp_id + ")");
 
+            // Capture the placement target before adding the result. Adding a
+            // layer inserts it at index 1 and shifts all existing indices.
+            var placementTarget = null;
+            if (manifest.placement !== "top_of_comp") {
+                var targetIndex = manifest.selected_layer_index;
+                if (targetIndex > 0 && targetIndex <= comp.numLayers) {
+                    placementTarget = comp.layer(targetIndex);
+                }
+            }
+
             var footage = _importFile(resultPath);
 
             // Hard validation: no silent geometry/time drift.
@@ -591,7 +721,7 @@ var AE2C = (function () {
                             " != " + manifest.frame_count);
                     }
                 } catch (e) {
-                    problems.push("cannot verify fps/duration: " + e);
+                    problems.push("cannot verify fps/duration: " + _errorText(e));
                 }
             }
             if (problems.length) {
@@ -617,13 +747,10 @@ var AE2C = (function () {
 
             if (manifest.placement === "top_of_comp") {
                 layer.moveToBeginning();
+            } else if (placementTarget && placementTarget !== layer) {
+                layer.moveBefore(placementTarget);
             } else {
-                var idx = manifest.selected_layer_index;
-                if (idx > 0 && idx <= comp.numLayers) {
-                    layer.moveBefore(comp.layer(idx));
-                } else {
-                    layer.moveToBeginning();
-                }
+                layer.moveToBeginning();
             }
 
             return JSON.stringify({
@@ -633,7 +760,7 @@ var AE2C = (function () {
                 placed_at_seconds: anchor
             });
         } catch (e) {
-            return _err("importResult failed: " + e);
+            return _err("importResult failed: " + _errorText(e));
         }
     }
 
@@ -645,6 +772,7 @@ var AE2C = (function () {
         cancelVideo: cancelVideo,
         importResult: importResult,
         buildManifest: buildManifest,
-        manifestFieldsJSON: manifestFieldsJSON
+        manifestFieldsJSON: manifestFieldsJSON,
+        setupTemplatesJSON: setupTemplatesJSON
     };
 })();

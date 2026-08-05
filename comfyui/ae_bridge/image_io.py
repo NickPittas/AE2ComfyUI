@@ -47,6 +47,20 @@ def decode_image_bytes(data: bytes, fmt: object) -> Tuple[torch.Tensor, torch.Te
     return image, mask, width, height
 
 
+def decode_mask_bytes(data: bytes) -> Tuple[torch.Tensor, int, int]:
+    """Decode an opaque grayscale mask carrier into (MASK, width, height).
+
+    AE exports the selected layer's masked alpha as white-on-black RGB. White
+    is ComfyUI mask value 1 (process/edit), and black is 0 (keep). Carrier
+    alpha is intentionally ignored.
+    """
+    img = Image.open(io.BytesIO(data)).convert("L")
+    arr = np.asarray(img).astype(np.float32) / 255.0
+    height, width = arr.shape
+    mask = torch.from_numpy(np.ascontiguousarray(arr)).unsqueeze(0)
+    return mask, width, height
+
+
 def _srgb_icc_bytes() -> Optional[bytes]:
     """sRGB ICC profile bytes via Pillow's ImageCms; None when unavailable."""
     try:

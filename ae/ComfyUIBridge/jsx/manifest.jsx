@@ -28,7 +28,7 @@ var AE2CManifest = (function () {
     /* opts: panel choices (job_id, media_type, placement, mask_mode, prompt,
      *   image/video formats, bridge_color_mode)
      * ctx: AE context from getContextJSON (width/height/fps/current_time/
-     *   work area/selected layer/color)
+     *   composition duration/selected layer/color)
      */
     function buildManifest(opts, ctx) {
         opts = opts || {};
@@ -70,21 +70,12 @@ var AE2CManifest = (function () {
             m.frame_count = 1;
             m.duration_seconds = 1 / m.fps;
         } else {
-            var start, dur;
-            if (ctx.has_work_area) {
-                start = ctx.work_area_start;
-                dur = ctx.work_area_duration;
-                m.range_source = "work_area";
-            } else if (ctx.selected_layer_index > 0 &&
-                       ctx.selected_layer_out > ctx.selected_layer_in) {
-                start = ctx.selected_layer_in;
-                dur = ctx.selected_layer_out - ctx.selected_layer_in;
-                m.range_source = "layer_range";
-            } else {
-                start = 0;
-                dur = ctx.duration_seconds;
-                m.range_source = "comp";
-            }
+            // Video transport is always the full composition. The selected
+            // layer identifies only the mask source and placement target; it
+            // must never crop the image/video payload or its time range.
+            var start = 0;
+            var dur = ctx.duration_seconds;
+            m.range_source = "comp";
             m.timeline_start_seconds = start;
             m.timeline_end_seconds_exclusive = start + dur;
             m.duration_seconds = dur;
