@@ -77,14 +77,35 @@ var AE2CManifest = (function () {
             m.frame_count = 1;
             m.duration_seconds = 1 / m.fps;
         } else {
-            // Video transport is always the full composition. The selected
-            // layer identifies only the mask source and placement target; it
-            // must never crop the image/video payload or its time range.
+            // Video transport renders the original comp over the selected
+            // layer's in/out range, frame-quantized. Comp resolution/settings
+            // are untouched; the layer only defines the time interval. With no
+            // layer selected (or an empty range) the full comp is used.
             var start = 0;
-            var dur = ctx.duration_seconds;
+            var end = ctx.duration_seconds || 0;
             m.range_source = "comp";
+            if (ctx.selected_layer_index > 0 &&
+                    ctx.selected_layer_in !== undefined &&
+                    ctx.selected_layer_out !== undefined) {
+                var inT = Number(ctx.selected_layer_in) || 0;
+                var outT = Number(ctx.selected_layer_out) || 0;
+                var durC = ctx.duration_seconds || 0;
+                var fps = m.fps > 0 ? m.fps : 1;
+                if (outT > inT && inT < durC && outT > 0) {
+                    inT = Math.max(0, Math.min(inT, durC));
+                    outT = Math.max(0, Math.min(outT, durC));
+                    inT = Math.round(inT * fps) / fps;
+                    outT = Math.round(outT * fps) / fps;
+                    if (outT > inT) {
+                        start = inT;
+                        end = outT;
+                        m.range_source = "layer_in_out";
+                    }
+                }
+            }
+            var dur = Math.max(0, end - start);
             m.timeline_start_seconds = start;
-            m.timeline_end_seconds_exclusive = start + dur;
+            m.timeline_end_seconds_exclusive = end;
             m.duration_seconds = dur;
             m.frame_count = Math.max(1, Math.round(dur * m.fps));
         }

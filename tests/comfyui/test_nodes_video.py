@@ -121,3 +121,72 @@ def test_to_ae_video_meta_json_overrides():
     result = job_store.get_result("job-v1")
     assert result["path"].endswith(".mp4")
     assert result["metadata"]["fps"] == 30.0
+
+
+def test_chunked_upload_decodes_in_from_ae_video():
+    """Bytes uploaded through begin/chunk/finish == bytes FromAEVideo consumes.
+
+    Uploads the real encoded video via the HTTP chunk endpoints, then pulls it
+    through FromAEVideo and compares frame data against the pre-upload decode.
+    """
+    import asyncio
+
+    import pytest
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from comfyui.ae_bridge import routes
+
+    frames = make_frames()
+    job_id = "job-chunked"
+    d = job_store.job_dir(job_id)
+    main_path = d + "/main.mov"
+    meta = {
+        "media_type": "video", "width": W, "height": H,
+        "fps": FPS, "frame_count": FRAMES,
+        "duration_seconds": FRAMES / FPS,
+        "mask_mode": "none", "video_format": "mov",
+        "mov_codec": "prores_4444", "prompt": "chunked round trip",
+    }
+    job_store.create_job(job_id, meta)
+    video_io.encode_video(frames, main_path, "mov", "prores_4444", FPS)
+    with open(main_path, "rb") as fh:
+        payload = fh.read()
+
+    async def run():
+        app = web.Application()
+        assert routes.register_handlers(app.router) is True
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/ae_bridge/assets/begin", json={
+                "job_id": job_id, "asset_id": "main",
+                "filename": "main.mov", "size": len(payload), "metadata": meta,
+            })
+            assert resp.status == 200, await resp.text()
+            step = 64 * 1024
+            for offset in range(0, len(payload), step):
+                chunk = payload[offset:offset + step]
+                resp = await client.post(
+                    f"/ae_bridge/assets/chunk?job_id={job_id}&asset_id=main"
+                    f"&offset={offset}",
+                    data=chunk, headers={"Content-Type": "application/octet-stream"},
+                )
+                assert resp.status == 200, await resp.text()
+            resp = await client.post("/ae_bridge/assets/finish", json={
+                "job_id": job_id, "asset_id": "main", "size": len(payload),
+            })
+            assert resp.status == 200, await resp.text()
+            # The server must have replaced the seeded asset with the upload.
+            stored = job_store.get_asset(job_id, "main")
+            with open(stored, "rb") as fh:
+                assert fh.read() == payload
+
+    asyncio.run(run())
+
+    # Consume the uploaded bytes exactly as a workflow would.
+    image, mask, w, h, count, fps, duration, meta_json = FromAEVideo().pull(
+        job_id, "main"
+    )
+    assert image.shape == (FRAMES, H, W, 3)
+    assert (w, h, count) == (W, H, FRAMES)
+    assert fps == pytest.approx(FPS)
+    assert json.loads(meta_json)["prompt"] == "chunked round trip"

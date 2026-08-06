@@ -237,6 +237,173 @@
         if (result.err !== 0) throw new Error("cannot write " + path);
     }
 
+    // --- chunked file IO (bounded-memory video transport) -------------------
+
+    var CHUNK_BYTES = 4 * 1024 * 1024;          // transport chunk size
+    var LEGACY_MAX_WHOLE_FILE = 64 * 1024 * 1024; // cep.fs whole-file fallback cap
+    var lastProgressLogAt = 0;
+
+    function base64ToBytes(b64) {
+        var bin = atob(b64);
+        var bytes = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return bytes;
+    }
+
+    function bytesToBase64(bytes) {
+        var bin = "";
+        for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        return btoa(bin);
+    }
+
+    function readChunkNode(path, offset, size) {
+        var fs = nodeFs();
+        var fd = fs.openSync(path, "r");
+        try {
+            var buf = Buffer.alloc(size);
+            var n = fs.readSync(fd, buf, 0, size, offset);
+            return new Uint8Array(buf.buffer, buf.byteOffset, n);
+        } finally {
+            fs.closeSync(fd);
+        }
+    }
+
+    function readChunkHost(path, offset, size) {
+        return hostCall("readFileChunk(" + JSON.stringify(JSON.stringify({
+            path: path, offset: offset, size: size
+        })) + ")").then(function (r) {
+            if (!r.base64) throw new Error("AE host returned no chunk data");
+            return base64ToBytes(r.base64);
+        });
+    }
+
+    function writeChunkNode(path, offset, bytes) {
+        var fs = nodeFs();
+        var fd = fs.openSync(path, offset === 0 ? "w" : "r+");
+        try {
+            fs.writeSync(fd, Buffer.from(bytes), 0, bytes.length, offset);
+        } finally {
+            fs.closeSync(fd);
+        }
+    }
+
+    function writeChunkHost(path, offset, bytes) {
+        return hostCall("writeFileChunk(" + JSON.stringify(JSON.stringify({
+            path: path, offset: offset, data: bytesToBase64(bytes)
+        })) + ")");
+    }
+
+    function fileSizeBytes(path) {
+        var fs = nodeFs();
+        if (fs) return Promise.resolve(fs.statSync(path).size);
+        return hostCall("fileSizeJSON(" + JSON.stringify(JSON.stringify({ path: path })) + ")")
+            .then(function (r) {
+                if (!r.ok) throw new Error("cannot stat " + path);
+                return r.size;
+            });
+    }
+
+    function throttledProgressLog(event, jobId, done, total) {
+        var now = Date.now();
+        if (done === total || now - lastProgressLogAt > 1000) {
+            lastProgressLogAt = now;
+            panelLog(event, jobId + " " + done + "/" + total);
+        }
+    }
+
+    function hostBridgeAvailable() {
+        return typeof CSInterface !== "undefined" ||
+            (window.__adobe_cep__ && typeof window.__adobe_cep__.evalScript === "function");
+    }
+
+    // Stream one video asset to the server with bounded memory. Falls back to
+    // the legacy whole-file path only for files <= 64 MB when no chunk reader
+    // exists, with an explicit error above that cap.
+    function uploadVideoAsset(client, jobId, path, assetId, manifest) {
+        var fs = nodeFs();
+        return fileSizeBytes(path).then(function (fileSize) {
+            var reader;
+            if (fs) {
+                reader = function (offset, size) { return readChunkNode(path, offset, size); };
+            } else if (hostBridgeAvailable()) {
+                reader = function (offset, size) { return readChunkHost(path, offset, size); };
+            } else if (fileSize <= LEGACY_MAX_WHOLE_FILE) {
+                panelLog("UPLOAD LEGACY", "no chunk reader; whole-file upload of " +
+                    fileSize + " bytes for " + path);
+                return client.uploadAsset(jobId, assetId, readFileBytes(path),
+                    path.split(/[\\/]/).pop(), manifest);
+            } else {
+                throw new Error("cannot chunk-read " + path + " (" + fileSize +
+                    " bytes > " + LEGACY_MAX_WHOLE_FILE +
+                    " legacy limit); restart AE with the host bridge or Node fs");
+            }
+            panelLog("UPLOAD START", jobId + " " + assetId + " size=" + fileSize);
+            return client.uploadAssetChunked(jobId, assetId, fileSize,
+                path.split(/[\\/]/).pop(), manifest, reader,
+                function (p) { throttledProgressLog("UPLOAD PROGRESS", jobId, p.uploaded, p.total); },
+                CHUNK_BYTES);
+        });
+    }
+
+    // Upload main + mask, then verify registration server-side (GET jobs).
+    function uploadAssets(client, choices, exportResult, manifest) {
+        var step = Promise.resolve();
+        if (choices.media_type === "video") {
+            step = step.then(function () {
+                return uploadVideoAsset(client, choices.job_id, exportResult.main_path, "main", manifest);
+            });
+        } else {
+            step = step.then(function () {
+                return client.uploadAsset(choices.job_id, "main",
+                    readFileBytes(exportResult.main_path),
+                    exportResult.main_path.split(/[\\/]/).pop(), manifest);
+            });
+        }
+        if (exportResult.mask_path) {
+            step = step.then(function () {
+                if (choices.media_type === "video") {
+                    return uploadVideoAsset(client, choices.job_id, exportResult.mask_path, "mask", manifest);
+                }
+                return client.uploadAsset(choices.job_id, "mask",
+                    readFileBytes(exportResult.mask_path),
+                    exportResult.mask_path.split(/[\\/]/).pop(), manifest);
+            });
+        }
+        return step.then(function () {
+            var required = ["main"];
+            if (exportResult.mask_path) required.push("mask");
+            return client.getJob(choices.job_id).then(function (job) {
+                var missing = required.filter(function (a) { return !(job.assets && job.assets[a]); });
+                if (missing.length) {
+                    throw new Error("upload verification failed: missing asset(s) " + missing.join(", "));
+                }
+                panelLog("UPLOAD VERIFY", choices.job_id + " assets=" + required.join(","));
+                return job;
+            });
+        });
+    }
+
+    // Write the downloaded result to disk. Video streams via Range chunks;
+    // stills use the existing whole-file path (small).
+    function downloadResultToPath(client, jobId, outPath, mediaType) {
+        if (mediaType === "video") {
+            return client.downloadResultChunked(jobId, function (offset, bytes) {
+                var fs = nodeFs();
+                if (fs) { writeChunkNode(outPath, offset, bytes); return null; }
+                return writeChunkHost(outPath, offset, bytes);
+            }, function (p) {
+                throttledProgressLog("DOWNLOAD PROGRESS", jobId, p.downloaded, p.total);
+            }, CHUNK_BYTES).then(function (info) {
+                panelLog("DOWNLOAD DONE", jobId + " total=" + info.total);
+                return { outPath: outPath, meta: info.meta };
+            });
+        }
+        return client.downloadResult(jobId).then(function (dl) {
+            writeFileBytes(outPath, dl.bytes);
+            return { outPath: outPath, meta: dl.meta };
+        });
+    }
+
     function ensureDir(path) {
         var fs = nodeFs();
         if (fs) return fs.mkdirSync(path, { recursive: true });
@@ -506,9 +673,77 @@
         }
     }
 
+    // --- preflight ---------------------------------------------------------
+
+    var objectInfoCache = { ts: 0, data: null };
+    var OBJECT_INFO_TTL_MS = 60 * 1000;
+
+    function getObjectInfo(client) {
+        var now = Date.now();
+        if (objectInfoCache.data && now - objectInfoCache.ts < OBJECT_INFO_TTL_MS) {
+            return Promise.resolve(objectInfoCache.data);
+        }
+        return client.getObjectInfo()
+            .then(function (info) {
+                objectInfoCache.data = info;
+                objectInfoCache.ts = now;
+                return info;
+            })
+            .catch(function (e) {
+                var err = new Error("object_info fetch failed: " + e.message);
+                err.objectInfoUnavailable = true;
+                throw err;
+            });
+    }
+
+    /* Fetch + validate the workflow BEFORE any AE/AME render or upload.
+     * workflow-validation errors are fatal; object_info unavailability
+     * degrades to log-only (the workflow graph itself was still validated). */
+    function preflightWorkflow(client, workflowId, choices) {
+        panelLog("PREFLIGHT", "workflow " + workflowId + " media=" + choices.media_type +
+            " mask=" + choices.mask_mode);
+        return client.getWorkflowPrompt(workflowId)
+            .then(function (wf) {
+                var check = AE2CPatch.validateWorkflow(wf.prompt, choices.media_type, choices.mask_mode);
+                if (check.errors.length) throw new Error(check.errors.join("; "));
+                panelLog("PREFLIGHT OK", "workflow " + workflowId + " graph valid");
+                return wf;
+            })
+            .then(function (wf) {
+                return getObjectInfo(client)
+                    .then(function (info) {
+                        // Validate required inputs after applying the fields the
+                        // bridge injects at queue time. This still runs before
+                        // export, using an empty provisional manifest.
+                        var preflightPrompt = AE2CPatch.patchWorkflow(wf.prompt, {
+                            job_id: choices.job_id,
+                            asset_id: "main",
+                            prompt_text: choices.prompt,
+                            manifest: {}
+                        }).prompt;
+                        var check = AE2CPatch.validateNodeInputs(preflightPrompt, info);
+                        if (check.errors.length) {
+                            throw new Error("workflow input validation: " + check.errors.join("; "));
+                        }
+                        if (check.unknown.length) {
+                            panelLog("PREFLIGHT UNKNOWN NODES", check.unknown.join(", "));
+                        }
+                        return { wf: wf, objectInfo: info };
+                    })
+                    .catch(function (e) {
+                        if (e && e.objectInfoUnavailable) {
+                            panelLog("PREFLIGHT DEGRADED", e.message);
+                            return { wf: wf, objectInfo: null };
+                        }
+                        throw e;
+                    });
+            });
+    }
+
+
     function runGenerate() {
         var statusEl = $("status");
-        var choices, workflowId, manifest, exportResult, client;
+        var choices, workflowId, workflow, exportResult, manifest, client;
         try {
             choices = gatherChoices();
             choices.resultFolder = $("result-folder").value.trim() || Settings.get("resultFolder");
@@ -525,9 +760,15 @@
         runState.jobId = choices.job_id;
 
         var exportCall = choices.media_type === "video" ? "exportVideo" : "exportStill";
-        setStatus(statusEl, "Reading comp context…");
 
-        hostCall("getContextJSON()")
+        // Preflight (workflow fetch + validation) happens before any AE/AME
+        // render or upload; a broken workflow must not waste a render.
+        preflightWorkflow(client, workflowId, choices)
+            .then(function (pre) {
+                workflow = pre.wf;
+                setStatus(statusEl, "Reading comp context…");
+                return hostCall("getContextJSON()");
+            })
             .then(function (ctx) {
                 setStatus(statusEl, choices.media_type === "video"
                     ? "Queueing AME render…" : "Rendering frame…");
@@ -538,6 +779,9 @@
                 exportResult = exp;
                 manifest = exp.manifest;
                 checkCancelled();
+                panelLog("EXPORT RANGE", "job=" + choices.job_id + " range_source=" +
+                    manifest.range_source + " start=" + manifest.timeline_start_seconds +
+                    " duration=" + manifest.duration_seconds);
                 if (exp.color_applied === false) {
                     setStatus(statusEl, "Warning: output-module color settings " +
                         "were not applied (unsupported AE version) — verify " +
@@ -548,35 +792,19 @@
             .then(function () {
                 checkCancelled();
                 setStatus(statusEl, "Uploading assets…");
-                var mainBytes = readFileBytes(exportResult.main_path);
-                return client.uploadAsset(choices.job_id, "main", mainBytes,
-                    exportResult.main_path.split(/[\\/]/).pop(), manifest)
-                    .then(function () {
-                        if (exportResult.mask_path) {
-                            var maskBytes = readFileBytes(exportResult.mask_path);
-                            return client.uploadAsset(choices.job_id, "mask", maskBytes,
-                                exportResult.mask_path.split(/[\\/]/).pop(), manifest);
-                        }
-                    });
+                return uploadAssets(client, choices, exportResult, manifest);
             })
             .then(function () {
                 checkCancelled();
                 setStatus(statusEl, "Patching workflow…");
-                return client.getWorkflowPrompt(workflowId);
-            })
-            .then(function (wf) {
-                var check = AE2CPatch.validateWorkflow(
-                    wf.prompt, choices.media_type, choices.mask_mode
-                );
-                if (check.errors.length) throw new Error(check.errors.join("; "));
-                var patched = AE2CPatch.patchWorkflow(wf.prompt, {
+                var patched = AE2CPatch.patchWorkflow(workflow.prompt, {
                     job_id: choices.job_id,
                     asset_id: "main",
                     prompt_text: choices.prompt,
                     manifest: manifest
                 });
                 setStatus(statusEl, "Queueing in ComfyUI…");
-                return client.queuePrompt(patched.prompt, wf.client_id);
+                return client.queuePrompt(patched.prompt, workflow.client_id);
             })
             .then(function (q) {
                 setStatus(statusEl, "ComfyUI running…");
@@ -587,23 +815,21 @@
             .then(function () {
                 checkCancelled();
                 setStatus(statusEl, "Downloading result…");
-                return client.downloadResult(choices.job_id);
-            })
-            .then(function (dl) {
-                checkCancelled();
-                var ext = dl.meta.format ||
-                    (choices.media_type === "video" ? choices.video_format : choices.image_format);
+                var ext = choices.media_type === "video"
+                    ? choices.video_format : choices.image_format;
                 var outDir = pathJoin(choices.resultFolder, choices.job_id);
                 ensureDir(outDir);
                 var outPath = pathJoin(outDir, "result." + ext);
-                writeFileBytes(outPath, dl.bytes);
-                setStatus(statusEl, "Importing into comp…");
-                return hostCall("importResult(" + JSON.stringify(JSON.stringify({
-                    manifest: manifest,
-                    result_path: outPath
-                })) + ")").then(function (imp) {
-                    return { outPath: outPath, imp: imp };
-                });
+                return downloadResultToPath(client, choices.job_id, outPath, choices.media_type)
+                    .then(function (r) {
+                        setStatus(statusEl, "Importing into comp…");
+                        return hostCall("importResult(" + JSON.stringify(JSON.stringify({
+                            manifest: manifest,
+                            result_path: r.outPath
+                        })) + ")").then(function (imp) {
+                            return { outPath: r.outPath, imp: imp };
+                        });
+                    });
             })
             .then(function (r) {
                 setStatus(statusEl,

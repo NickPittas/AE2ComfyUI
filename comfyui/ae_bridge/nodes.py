@@ -195,9 +195,26 @@ class FromAEVideo:
         if str(meta.get("mask_mode") or "none") != "none":
             mask_path = job_store.get_asset(jid, "mask")
         expected = int(meta["frame_count"]) if meta.get("frame_count") else None
+        main_size = os.path.getsize(main_path)
+        print(
+            f"[AEBridge] FromAEVideo: decoding main {main_path} "
+            f"({main_size} bytes, expected {expected or '?'} frames)",
+            flush=True,
+        )
+        if mask_path:
+            print(
+                f"[AEBridge] FromAEVideo: decoding mask {mask_path} "
+                f"({os.path.getsize(mask_path)} bytes)",
+                flush=True,
+            )
         report = _VideoProgress(2 * expected + 1 if expected and mask_path else expected)
         image, mask, width, height, frame_count = video_io.decode_video(
             main_path, mask_path, expected_frames=expected, progress_cb=report
+        )
+        print(
+            f"[AEBridge] FromAEVideo: decoded {frame_count} frames "
+            f"{width}x{height} from {main_path}",
+            flush=True,
         )
         fps = float(meta.get("fps") or 24.0)
         duration = float(meta.get("duration_seconds") or frame_count / fps)

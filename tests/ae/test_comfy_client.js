@@ -120,5 +120,103 @@ function jsonResp(data, status = 200, headers = {}) {
     client = new ComfyClient("http://h:1", fetch);
     await assert.rejects(() => client.health(), /broken/);
 
+    // error path: ComfyUI validation node_errors formatted readably
+    fetch = mockFetch([
+        { match: "/prompt", method: "POST", response: jsonResp({ ok: false,
+            error: { type: "validation", message: "prompt contains errors",
+                extra_info: { node_errors: {
+                    "3": { class_type: "KSampler", errors: ["value not in list"] },
+                    "7": { class_type: "LoadImage", message: "boom" }
+                } } } }, 400) }
+    ]);
+    client = new ComfyClient("http://h:1", fetch);
+    await assert.rejects(() => client.queuePrompt({}, "cid"), /node 3 \(KSampler\): value not in list.*node 7 \(LoadImage\): boom/);
+
+    // getObjectInfo
+    fetch = mockFetch([
+        { match: "/object_info", response: jsonResp({ KSampler: { input: { required: {} } } }) }
+    ]);
+    client = new ComfyClient("http://h:1", fetch);
+    const objInfo = await client.getObjectInfo();
+    assert.ok(objInfo.KSampler, "object_info returned");
+
+    // getJob
+    fetch = mockFetch([
+        { match: "/ae_bridge/jobs/job9", response: jsonResp({ ok: true, assets: { main: "main.mov" } }) }
+    ]);
+    client = new ComfyClient("http://h:1", fetch);
+    const job = await client.getJob("job9");
+    assert.deepStrictEqual(job.assets, { main: "main.mov" });
+
+    // uploadAssetChunked: mocked fetch reassembles exact bytes
+    const uploadBytes = new Uint8Array((4 * 1024 * 1024) + 1234).map((_, i) => i % 251);
+    const uploadReceived = {};
+    const uploadCalls = [];
+    const uploadMock = async (url, opts = {}) => {
+        uploadCalls.push({ url, method: opts.method || "GET" });
+        if (url.includes("/assets/begin")) return jsonResp({ ok: true, size: uploadBytes.length });
+        if (url.includes("/assets/chunk")) {
+            const m = /offset=(\d+)/.exec(url);
+            uploadReceived[Number(m[1])] = new Uint8Array(opts.body);
+            return jsonResp({ ok: true });
+        }
+        if (url.includes("/assets/finish")) {
+            const body = JSON.parse(opts.body);
+            return jsonResp({ ok: true, size: body.size, path: "/tmp/x/main.mov" });
+        }
+        throw new Error("no mock for " + url);
+    };
+    const readChunk = (offset, size) => uploadBytes.slice(offset, offset + size);
+    let uploadProgress = [];
+    client = new ComfyClient("http://h:1", uploadMock);
+    const upRes = await client.uploadAssetChunked(
+        "jobc", "main", uploadBytes.length, "main.mov", { w: 8 }, readChunk,
+        (p) => uploadProgress.push(p.uploaded));
+    assert.strictEqual(upRes.size, uploadBytes.length);
+    assert.ok(uploadCalls.some((c) => c.url.includes("/assets/begin")), "begin called");
+    assert.ok(uploadCalls.some((c) => c.url.includes("/assets/finish")), "finish called");
+    // all offsets covered, no gaps, no overlaps
+    const offsets = Object.keys(uploadReceived).map(Number).sort((a, b) => a - b);
+    assert.strictEqual(offsets[0], 0, "first chunk at offset 0");
+    for (let i = 1; i < offsets.length; i++) {
+        assert.strictEqual(offsets[i], offsets[i - 1] + uploadReceived[offsets[i - 1]].length,
+            "chunks are contiguous");
+    }
+    const reassembled = new Uint8Array(uploadBytes.length);
+    for (const [off, bytes] of Object.entries(uploadReceived)) reassembled.set(bytes, Number(off));
+    assert.deepStrictEqual(reassembled, uploadBytes, "upload bytes reassembled exactly");
+    assert.strictEqual(uploadProgress[uploadProgress.length - 1], uploadBytes.length,
+        "progress reaches total");
+
+    // downloadResultChunked: Range requests reassemble exact bytes
+    const dlBytes = new Uint8Array((2 * 1024 * 1024) + 777).map((_, i) => (i * 13) % 256);
+    const dlMeta = { format: "mov", width: "64", height: "64", frameCount: "8", fps: "24", duration: "0.3333" };
+    const downloadMock = async (url, opts = {}) => {
+        const range = (opts.headers || {}).Range || "";
+        const m = /bytes=(\d+)-(\d+)/.exec(range);
+        if (!m) throw new Error("missing Range header");
+        const start = Number(m[1]), end = Number(m[2]);
+        const slice = dlBytes.slice(start, end + 1);
+        const ab = slice.buffer.slice(slice.byteOffset, slice.byteOffset + slice.byteLength);
+        return {
+            ok: true, status: 206,
+            headers: { get: (k) => ({
+                "Content-Range": `bytes ${start}-${end}/${dlBytes.length}`,
+                "X-AEBridge-Format": dlMeta.format, "X-AEBridge-Width": dlMeta.width,
+                "X-AEBridge-Height": dlMeta.height, "X-AEBridge-Frame-Count": dlMeta.frameCount,
+                "X-AEBridge-FPS": dlMeta.fps, "X-AEBridge-Duration": dlMeta.duration
+            })[k] || null },
+            arrayBuffer: async () => ab
+        };
+    };
+    const dlReceived = new Uint8Array(dlBytes.length);
+    const writeChunk = (offset, bytes) => { dlReceived.set(bytes, offset); return Promise.resolve(); };
+    client = new ComfyClient("http://h:1", downloadMock);
+    const dlC = await client.downloadResultChunked("jobv", writeChunk, null, 512 * 1024);
+    assert.strictEqual(dlC.total, dlBytes.length);
+    assert.strictEqual(dlC.meta.format, "mov");
+    assert.strictEqual(dlC.meta.frameCount, 8);
+    assert.deepStrictEqual(dlReceived, dlBytes, "download bytes reassembled exactly");
+
     console.log("test_comfy_client.js: all assertions passed");
 })().catch((e) => { console.error(e); process.exit(1); });

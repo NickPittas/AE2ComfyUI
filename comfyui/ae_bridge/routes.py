@@ -6,13 +6,17 @@ inside AE.
 Routes:
   GET  /ae_bridge/health
   POST /ae_bridge/assets            multipart: job_id, asset_id, metadata, file
+  POST /ae_bridge/assets/begin      chunked upload: JSON {job_id, asset_id, filename, size, metadata}
+  POST /ae_bridge/assets/chunk      chunked upload: raw bytes + job_id/asset_id/offset query
+  POST /ae_bridge/assets/finish     chunked upload: JSON {job_id, asset_id, size}
   GET  /ae_bridge/jobs/{job_id}
-  GET  /ae_bridge/jobs/{job_id}/result
+  GET  /ae_bridge/jobs/{job_id}/result   (Range supported)
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import uuid
@@ -20,8 +24,13 @@ from typing import Any, Dict
 
 from . import job_store
 
+log = logging.getLogger("ae_bridge")
 _ASSET_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _EXT_RE = re.compile(r"^\.[A-Za-z0-9]{1,8}$")
+
+# Largest single chunk the panel sends. Kept well under aiohttp's default
+# client_max_size (100 MB) so uploads sidestep any unverified server limit.
+MAX_CHUNK_BYTES = 16 * 1024 * 1024
 
 _CONTENT_TYPES = {
     "png": "image/png",
@@ -29,6 +38,12 @@ _CONTENT_TYPES = {
     "mov": "video/quicktime",
     "mp4": "video/mp4",
 }
+
+_RESULT_HEADERS = (
+    "X-AEBridge-Format, X-AEBridge-Width, X-AEBridge-Height, "
+    "X-AEBridge-Frame-Count, X-AEBridge-FPS, X-AEBridge-Duration, "
+    "Content-Range, Content-Length"
+)
 
 
 def _clean_asset_id(asset_id: Any) -> str:
@@ -51,11 +66,15 @@ def register_handlers(dispatcher: Any) -> bool:
         return False
 
     # CEP panels run from a file:// origin; without these headers Chromium
-    # blocks the panel's fetch calls depending on CEF security flags.
+    # blocks the panel's fetch calls depending on CEF security flags. Range and
+    # the result headers must be exposed: Range triggers a preflight (not a
+    # CORS-safelisted header) and the panel reads X-AEBridge-*/Content-Range
+    # from the result response.
     _CORS_HEADERS = {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Headers": "Content-Type, Range",
+        "Access-Control-Expose-Headers": _RESULT_HEADERS,
     }
 
     def _with_cors(handler):
@@ -70,7 +89,16 @@ def register_handlers(dispatcher: Any) -> bool:
         return web.Response(headers=_CORS_HEADERS)
 
     async def _health(_request: Any) -> Any:
-        return web.json_response({"ok": True, "app": "ae2comfyui"})
+        return web.json_response(
+            {
+                "ok": True,
+                "app": "ae2comfyui",
+                "job_store": {
+                    "module": job_store.module_identity(),
+                    "jobs": len(job_store.list_jobs()),
+                },
+            }
+        )
 
     async def _post_asset(request: Any) -> Any:
         fields: Dict[str, Any] = {}
@@ -118,6 +146,8 @@ def register_handlers(dispatcher: Any) -> bool:
             dest = os.path.join(entry["dir"], f"{asset_id}{ext}")
             os.replace(tmp_path, dest)
             job_store.store_asset(job_id, asset_id, dest)
+            log.info("[AEBridge] upload complete job=%s asset=%s size=%d path=%s",
+                     job_id, asset_id, os.path.getsize(dest), dest)
             return web.json_response({"ok": True, "path": dest})
         except Exception as exc:
             return web.json_response(
@@ -129,6 +159,171 @@ def register_handlers(dispatcher: Any) -> bool:
                     os.unlink(tmp_path)
                 except OSError:
                     pass
+
+    # --- chunked upload (large video transport) -----------------------------
+    #
+    # begin/chunk/finish keeps every request body <= MAX_CHUNK_BYTES and the
+    # server writes chunks at offsets without ever loading the whole video.
+
+    async def _begin_upload(request: Any) -> Any:
+        try:
+            try:
+                data = await request.json()
+            except Exception:
+                data = {}
+            job_id = str(data.get("job_id") or "").strip()
+            metadata = data.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            try:
+                asset_id = _clean_asset_id(data.get("asset_id"))
+                entry = job_store.create_job(job_id, metadata)
+            except ValueError as exc:
+                return web.json_response(
+                    {"ok": False, "error": str(exc)}, status=400
+                )
+            size = int(data.get("size") or 0)
+            if size <= 0:
+                return web.json_response(
+                    {"ok": False, "error": f"invalid size: {size!r}"}, status=400
+                )
+            ext = _clean_ext(data.get("filename"))
+            final_path = os.path.join(entry["dir"], f"{asset_id}{ext}")
+            part_path = final_path + ".part"
+            # Fresh attempt: truncate any stale .part from a previous run.
+            with open(part_path, "wb"):
+                pass
+            job_store.begin_upload(job_id, asset_id, part_path, size)
+            log.info("[AEBridge] upload begin job=%s asset=%s size=%d part=%s",
+                     job_id, asset_id, size, part_path)
+            return web.json_response(
+                {"ok": True, "asset_id": asset_id, "size": size, "path": final_path}
+            )
+        except Exception as exc:
+            return web.json_response(
+                {"ok": False, "error": f"upload begin failed: {exc}"}, status=500
+            )
+
+    async def _upload_chunk(request: Any) -> Any:
+        try:
+            job_id = str(request.query.get("job_id") or "").strip()
+            asset_id = str(request.query.get("asset_id") or "").strip()
+            try:
+                asset_id = _clean_asset_id(asset_id)
+            except ValueError as exc:
+                return web.json_response(
+                    {"ok": False, "error": str(exc)}, status=400
+                )
+            offset = int(request.query.get("offset") or 0)
+            if offset < 0:
+                return web.json_response(
+                    {"ok": False, "error": f"invalid offset: {offset}"}, status=400
+                )
+            state = job_store.get_upload(job_id, asset_id)
+            if state is None:
+                return web.json_response(
+                    {"ok": False, "error": "no upload in progress; call begin first"},
+                    status=400,
+                )
+            content_length = request.content_length
+            if content_length is not None and content_length > MAX_CHUNK_BYTES:
+                return web.json_response(
+                    {"ok": False, "error": "chunk exceeds 16 MB limit"}, status=413
+                )
+            data = bytearray()
+            async for body_part in request.content.iter_chunked(1024 * 1024):
+                data.extend(body_part)
+                if len(data) > MAX_CHUNK_BYTES:
+                    return web.json_response(
+                        {"ok": False, "error": "chunk exceeds 16 MB limit"},
+                        status=413,
+                    )
+            if not data:
+                return web.json_response(
+                    {"ok": False, "error": "empty chunk body"}, status=400
+                )
+            expected = int(state.get("size") or 0)
+            if offset + len(data) > expected:
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": (
+                            f"chunk exceeds declared upload size: offset {offset}, "
+                            f"bytes {len(data)}, expected {expected}"
+                        ),
+                    },
+                    status=400,
+                )
+            part = state["part_path"]
+            with open(part, "r+b") as fh:
+                fh.seek(offset)
+                fh.write(data)
+            job_store.mark_upload_written(job_id, asset_id, offset, len(data))
+            if offset == 0:
+                log.info("[AEBridge] upload first chunk job=%s asset=%s bytes=%d",
+                         job_id, asset_id, len(data))
+            return web.json_response(
+                {"ok": True, "offset": offset, "written": len(data)}
+            )
+        except Exception as exc:
+            return web.json_response(
+                {"ok": False, "error": f"upload chunk failed: {exc}"}, status=500
+            )
+
+    async def _finish_upload(request: Any) -> Any:
+        try:
+            try:
+                data = await request.json()
+            except Exception:
+                data = {}
+            job_id = str(data.get("job_id") or "").strip()
+            try:
+                asset_id = _clean_asset_id(data.get("asset_id"))
+            except ValueError as exc:
+                return web.json_response(
+                    {"ok": False, "error": str(exc)}, status=400
+                )
+            claimed = int(data.get("size") or 0)
+            state = job_store.get_upload(job_id, asset_id)
+            if state is None:
+                return web.json_response(
+                    {"ok": False, "error": "no upload in progress; call begin first"},
+                    status=400,
+                )
+            written = int(state.get("written") or 0)
+            expected = int(state.get("size") or 0)
+            ranges = state.get("ranges") or []
+            complete = ranges == [(0, expected)]
+            on_disk = 0
+            try:
+                on_disk = os.path.getsize(state["part_path"])
+            except OSError:
+                pass
+            if (claimed != expected or written != expected or
+                    on_disk != expected or not complete):
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": (
+                            "upload verification failed: claimed "
+                            f"{claimed}, expected {expected}, written {written}, "
+                            f"on-disk {on_disk}, ranges {ranges}"
+                        ),
+                    },
+                    status=400,
+                )
+            final_path = state["part_path"][:-5]  # strip ".part"
+            os.replace(state["part_path"], final_path)
+            job_store.finish_upload(job_id, asset_id, final_path)
+            log.info("[AEBridge] upload complete job=%s asset=%s size=%d path=%s",
+                     job_id, asset_id, expected, final_path)
+            return web.json_response(
+                {"ok": True, "asset_id": asset_id, "size": expected, "path": final_path}
+            )
+        except Exception as exc:
+            return web.json_response(
+                {"ok": False, "error": f"upload finish failed: {exc}"}, status=500
+            )
 
     async def _get_job(request: Any) -> Any:
         entry = job_store.get_job(request.match_info["job_id"])
@@ -170,6 +365,7 @@ def register_handlers(dispatcher: Any) -> bool:
             "X-AEBridge-Format": fmt,
             "X-AEBridge-Width": str(meta.get("width") or ""),
             "X-AEBridge-Height": str(meta.get("height") or ""),
+            "Content-Type": _CONTENT_TYPES.get(fmt, "application/octet-stream"),
         }
         if meta.get("frame_count"):
             headers["X-AEBridge-Frame-Count"] = str(meta["frame_count"])
@@ -177,15 +373,18 @@ def register_handlers(dispatcher: Any) -> bool:
             headers["X-AEBridge-FPS"] = str(meta["fps"])
         if meta.get("duration_seconds"):
             headers["X-AEBridge-Duration"] = str(meta["duration_seconds"])
-        return web.Response(
-            body=open(path, "rb").read(),
-            content_type=_CONTENT_TYPES.get(fmt, "application/octet-stream"),
-            headers=headers,
-        )
+        # FileResponse streams the file and honors Range (206 + Content-Range)
+        # so the panel can download large videos in bounded-memory chunks.
+        log.info("[AEBridge] result download job=%s range=%s format=%s",
+                 job_id, request.headers.get("Range") or "full", fmt)
+        return web.FileResponse(path, headers=headers)
 
     spec = (
         ("GET", "/ae_bridge/health", _health),
         ("POST", "/ae_bridge/assets", _post_asset),
+        ("POST", "/ae_bridge/assets/begin", _begin_upload),
+        ("POST", "/ae_bridge/assets/chunk", _upload_chunk),
+        ("POST", "/ae_bridge/assets/finish", _finish_upload),
         ("GET", "/ae_bridge/jobs/{job_id}", _get_job),
         ("GET", "/ae_bridge/jobs/{job_id}/result", _get_result),
     )

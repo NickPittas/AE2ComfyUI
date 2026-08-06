@@ -95,6 +95,125 @@ var AE2C = (function () {
         return dir + sep + name;
     }
 
+    // --- binary chunk IO (ES3, File.encoding="binary") ----------------------
+    //
+    // ExtendScript has no btoa/atob, so base64 encode/decode is hand-rolled.
+    // Binary read/write byte fidelity on AE 26 is a flagged live verification
+    // point; readFileChunk validates that every read char is a byte (<=255)
+    // and returns an explicit actionable error instead of corrupt data.
+
+    var _B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    function _b64encode(s) {
+        var out = "";
+        var i = 0;
+        for (; i + 3 <= s.length; i += 3) {
+            var n = (s.charCodeAt(i) << 16) | (s.charCodeAt(i + 1) << 8) | s.charCodeAt(i + 2);
+            out += _B64_CHARS.charAt((n >> 18) & 63) + _B64_CHARS.charAt((n >> 12) & 63) +
+                _B64_CHARS.charAt((n >> 6) & 63) + _B64_CHARS.charAt(n & 63);
+        }
+        var rem = s.length - i;
+        if (rem === 1) {
+            var n1 = s.charCodeAt(i) << 16;
+            out += _B64_CHARS.charAt((n1 >> 18) & 63) + _B64_CHARS.charAt((n1 >> 12) & 63) + "==";
+        } else if (rem === 2) {
+            var n2 = (s.charCodeAt(i) << 16) | (s.charCodeAt(i + 1) << 8);
+            out += _B64_CHARS.charAt((n2 >> 18) & 63) + _B64_CHARS.charAt((n2 >> 12) & 63) +
+                _B64_CHARS.charAt((n2 >> 6) & 63) + "=";
+        }
+        return out;
+    }
+
+    function _b64decode(s) {
+        var out = "";
+        var buffer = 0, bits = 0;
+        for (var i = 0; i < s.length; i++) {
+            var c = s.charAt(i);
+            if (c === "=" || c === "\n" || c === "\r") continue;
+            var idx = _B64_CHARS.indexOf(c);
+            if (idx < 0) throw new Error("invalid base64 character: " + c);
+            buffer = (buffer << 6) | idx;
+            bits += 6;
+            if (bits >= 8) {
+                bits -= 8;
+                out += String.fromCharCode((buffer >> bits) & 0xFF);
+            }
+        }
+        return out;
+    }
+
+    function readFileChunk(optsJSON) {
+        try {
+            var opts = JSON.parse(optsJSON);
+            var path = String(opts.path || "");
+            var offset = Number(opts.offset || 0);
+            var size = Number(opts.size || 0);
+            var f = new File(path);
+            if (!f.exists) return _err("readFileChunk: file not found: " + path);
+            f.encoding = "binary";
+            if (!f.open("r")) return _err("readFileChunk: cannot open " + path);
+            try {
+                if (offset > 0 && !f.seek(offset, 0)) {
+                    return _err("readFileChunk: seek failed at " + offset);
+                }
+                var text = f.read(size);
+                for (var i = 0; i < text.length; i++) {
+                    if (text.charCodeAt(i) > 255) {
+                        return _err(
+                            "readFileChunk: binary read produced non-byte data at offset " +
+                            offset + " (ExtendScript binary fidelity check failed on AE 26); " +
+                            "install Node-fs or use the <=64 MB legacy path"
+                        );
+                    }
+                }
+                return JSON.stringify({
+                    ok: true, base64: _b64encode(text), bytes: text.length
+                });
+            } finally {
+                f.close();
+            }
+        } catch (e) {
+            return _err("readFileChunk failed: " + _errorText(e));
+        }
+    }
+
+    function writeFileChunk(optsJSON) {
+        try {
+            var opts = JSON.parse(optsJSON);
+            var path = String(opts.path || "");
+            var offset = Number(opts.offset || 0);
+            var f = new File(path);
+            f.encoding = "binary";
+            // offset 0 (re)creates/truncates; later chunks append in place.
+            var mode = (offset === 0 || !f.exists) ? "w" : "r+";
+            if (!f.open(mode)) return _err("writeFileChunk: cannot open " + path + " (" + mode + ")");
+            try {
+                if (offset > 0 && !f.seek(offset, 0)) {
+                    return _err("writeFileChunk: seek failed at " + offset);
+                }
+                var text = _b64decode(String(opts.data || ""));
+                f.write(text);
+                return JSON.stringify({ ok: true, bytes: text.length });
+            } finally {
+                f.close();
+            }
+        } catch (e) {
+            return _err("writeFileChunk failed: " + _errorText(e));
+        }
+    }
+
+    function fileSizeJSON(optsJSON) {
+        try {
+            var opts = JSON.parse(optsJSON);
+            var path = String(opts.path || "");
+            var f = new File(path);
+            var size = f.exists ? f.length : -1;
+            return JSON.stringify({ ok: size >= 0, size: size, path: path });
+        } catch (e) {
+            return _err("fileSize failed: " + _errorText(e));
+        }
+    }
+
     // comp.workAreaDuration exists since AE 2020 (16.x); guard for safety.
     function _workArea(comp) {
         var start = 0, dur = comp.duration;
@@ -272,45 +391,111 @@ var AE2C = (function () {
 
     // Build a temp comp showing only the selected layer's alpha as white-on-
     // black luminance, optionally inverted. Used for mask exports.
+    //
+    // Implementation: comp.duplicate() preserves every relationship, then we
+    // prune to the dependency closure (selected layer, its parent chain, its
+    // track-matte chain, and layers that consume it as parent or matte). The
+    // white solid is matted by the duplicated selected layer so the render is
+    // pure grayscale mask data; a black solid sits at the bottom.
+    //
+    // Track-matte note: a matted layer used AS a matte source is assumed to
+    // carry its own matte's alpha through (live-verify on AE 26; if wrong the
+    // closure still keeps the matte chain and the white solid must matte off a
+    // precomposited variant instead).
     function _buildMaskComp(comp, layer, invert, name) {
-        var maskComp = app.project.items.addComp(
-            name, comp.width, comp.height, comp.pixelAspect,
-            comp.duration, comp.frameRate
-        );
+        var dup = null;
         try {
-            try { maskComp.displayStartTime = comp.displayStartTime; } catch (ignored) {}
-            // Solid black background.
-            var bg = maskComp.layers.addSolid(
-                [0, 0, 0], "ae2c_bg", comp.width, comp.height,
-                comp.pixelAspect, comp.duration
-            );
-            // Copy of the source layer; use its alpha as a track matte over a
-            // white solid so the render is pure grayscale mask data.
-            var white = maskComp.layers.addSolid(
-                [1, 1, 1], "ae2c_white", comp.width, comp.height,
-                comp.pixelAspect, comp.duration
-            );
-            layer.copyToComp(maskComp);
-            // copyToComp inserts the copied source at the top. Keep the
-            // opaque black solid at the bottom; moving it to the beginning
-            // covered the entire matte and produced a uniform black mask.
-            var matte = maskComp.layer(1);
-            bg.moveToEnd();
-            try {
-                var matteType = invert ? TrackMatteType.ALPHA_INVERTED
-                                       : TrackMatteType.ALPHA;
-                if (typeof white.setTrackMatte === "function") {
-                    white.setTrackMatte(matte, matteType);
-                } else {
-                    matte.moveBefore(white);
-                    white.trackMatteType = matteType;
+            var selectedIndex = layer.index;
+            dup = comp.duplicate();
+            try { dup.name = name; } catch (ignored) {}
+            try { dup.displayStartTime = comp.displayStartTime; } catch (ignored) {}
+
+            // Dependency closure over the ORIGINAL comp indices.
+            var keep = {};
+            var stack = [selectedIndex];
+            keep[selectedIndex] = true;
+            while (stack.length) {
+                var idx = stack.pop();
+                var src = comp.layer(idx);
+                if (!src) continue;
+                var parent = null;
+                try { parent = src.parent; } catch (e) {}
+                if (parent && !keep[parent.index]) {
+                    keep[parent.index] = true;
+                    stack.push(parent.index);
                 }
-            } catch (e) {
-                throw new Error("track matte setup failed: " + _errorText(e));
+                // Track matte of a layer is the layer directly above it.
+                if (idx > 1) {
+                    try {
+                        var hasMatte = typeof src.trackMatteType !== "undefined" &&
+                            src.trackMatteType !== TrackMatteType.NO_TRACK_MATTE;
+                        if (hasMatte && !keep[idx - 1]) {
+                            keep[idx - 1] = true;
+                            stack.push(idx - 1);
+                        }
+                    } catch (e) {}
+                }
+                // Descendants: layers that use this layer as parent or matte.
+                for (var j = 1; j <= comp.numLayers; j++) {
+                    if (keep[j]) continue;
+                    var cand = comp.layer(j);
+                    var candParent = null;
+                    try { candParent = cand.parent; } catch (e) {}
+                    if (candParent && candParent.index === idx) {
+                        keep[j] = true;
+                        stack.push(j);
+                        continue;
+                    }
+                    if (j > 1) {
+                        try {
+                            if (typeof cand.trackMatteType !== "undefined" &&
+                                cand.trackMatteType !== TrackMatteType.NO_TRACK_MATTE &&
+                                comp.layer(j - 1).index === idx) {
+                                keep[j] = true;
+                                stack.push(j);
+                            }
+                        } catch (e) {}
+                    }
+                }
             }
-            return maskComp;
+
+            // Snapshot live layer references from the duplicate, then remove
+            // everything outside the closure (removing by reference avoids
+            // index shifting).
+            var allRefs = [];
+            for (var k = 1; k <= comp.numLayers; k++) allRefs.push(dup.layer(k));
+            for (var k2 = comp.numLayers; k2 >= 1; k2--) {
+                if (!keep[k2]) {
+                    try { allRefs[k2 - 1].remove(); } catch (e) {}
+                }
+            }
+            var selDup = allRefs[selectedIndex - 1];
+            if (!selDup) throw new Error("mask comp: duplicated selected layer not found");
+
+            // Solid black background.
+            var bg = dup.layers.addSolid(
+                [0, 0, 0], "ae2c_bg", dup.width, dup.height,
+                dup.pixelAspect, dup.duration
+            );
+            // White solid matted by the duplicated selected layer's alpha.
+            var white = dup.layers.addSolid(
+                [1, 1, 1], "ae2c_white", dup.width, dup.height,
+                dup.pixelAspect, dup.duration
+            );
+            bg.moveToEnd();
+            var matteType = invert ? TrackMatteType.ALPHA_INVERTED
+                                   : TrackMatteType.ALPHA;
+            if (typeof white.setTrackMatte === "function") {
+                white.setTrackMatte(selDup, matteType);
+            } else {
+                selDup.moveBefore(white);
+                white.trackMatteType = matteType;
+            }
+            return dup;
         } catch (e) {
-            try { maskComp.remove(); } catch (e2) {}
+            if (dup) {
+                try { dup.remove(); } catch (e2) {}
+            }
             throw e;
         }
     }
@@ -544,6 +729,7 @@ var AE2C = (function () {
 
     function exportVideo(optsJSON) {
         var maskComp = null;
+        var jobRegistered = false;
         try {
             var opts = JSON.parse(optsJSON);
             var comp = _activeComp();
@@ -567,8 +753,9 @@ var AE2C = (function () {
             var dur = manifest.duration_seconds;
 
             var colorApplied = false;
-            // Main transport is the complete composition. Selection affects
-            // only the independently rendered mask and result placement.
+            // Main transport is the complete composition rendered over the
+            // selected layer's in/out range (frame-quantized in the manifest).
+            // Comp resolution/settings are untouched.
             var candidates = (fmt === "mp4")
                 ? TEMPLATE_CANDIDATES.mp4
                 : TEMPLATE_CANDIDATES[manifest.mov_codec];
@@ -595,10 +782,15 @@ var AE2C = (function () {
             _videoJobs[manifest.job_id] = {
                 main_path: mainPath,
                 mask_path: maskPath,
+                mask_comp: maskComp,
                 sizes: {},
                 stable: {},
                 started: new Date().getTime()
             };
+            jobRegistered = true;
+            // The mask comp must survive until AME finishes; it is removed in
+            // exportVideoStatus (done) or cancelVideo, never here.
+            maskComp = null;
 
             return JSON.stringify({
                 ok: true,
@@ -612,10 +804,20 @@ var AE2C = (function () {
         } catch (e) {
             return _err("exportVideo failed: " + _errorText(e));
         } finally {
-            if (maskComp) {
+            // Only clean up a mask comp that was built but never handed to a
+            // registered job (export failed before _videoJobs was set).
+            if (!jobRegistered && maskComp) {
                 try { maskComp.remove(); } catch (e) {}
             }
         }
+    }
+
+    function _cleanupVideoJob(job, jobId) {
+        if (job && job.mask_comp) {
+            try { job.mask_comp.remove(); } catch (e) {}
+            job.mask_comp = null;
+        }
+        delete _videoJobs[jobId];
     }
 
     function _fileStable(job, path) {
@@ -638,12 +840,24 @@ var AE2C = (function () {
             if (!job) return _err("unknown video job: " + opts.job_id);
             var mainDone = _fileStable(job, job.main_path);
             var maskDone = !job.mask_path || _fileStable(job, job.mask_path);
+            var elapsed = new Date().getTime() - job.started;
+            if (mainDone && maskDone) {
+                // AME is done with the mask comp; release it now.
+                _cleanupVideoJob(job, opts.job_id);
+                return JSON.stringify({
+                    ok: true,
+                    done: true,
+                    main_ready: true,
+                    mask_ready: true,
+                    elapsed_ms: elapsed
+                });
+            }
             return JSON.stringify({
                 ok: true,
-                done: mainDone && maskDone,
+                done: false,
                 main_ready: mainDone,
                 mask_ready: maskDone,
-                elapsed_ms: new Date().getTime() - job.started
+                elapsed_ms: elapsed
             });
         } catch (e) {
             return _err("exportVideoStatus failed: " + _errorText(e));
@@ -651,12 +865,14 @@ var AE2C = (function () {
     }
 
     function cancelVideo(optsJSON) {
-        // Stops local tracking/polling. The AME encode and the ComfyUI queue
-        // item keep running server-side; the panel also POSTs /interrupt.
+        // Stops local tracking/polling and releases the mask comp. The AME
+        // encode and the ComfyUI queue item keep running server-side; the
+        // panel also POSTs /interrupt.
         try {
             var opts = JSON.parse(optsJSON);
-            var existed = !!_videoJobs[opts.job_id];
-            delete _videoJobs[opts.job_id];
+            var job = _videoJobs[opts.job_id];
+            var existed = !!job;
+            _cleanupVideoJob(job, opts.job_id);
             return JSON.stringify({ ok: true, cancelled: existed });
         } catch (e) {
             return _err("cancelVideo failed: " + _errorText(e));
@@ -773,6 +989,9 @@ var AE2C = (function () {
         importResult: importResult,
         buildManifest: buildManifest,
         manifestFieldsJSON: manifestFieldsJSON,
-        setupTemplatesJSON: setupTemplatesJSON
+        setupTemplatesJSON: setupTemplatesJSON,
+        readFileChunk: readFileChunk,
+        writeFileChunk: writeFileChunk,
+        fileSizeJSON: fileSizeJSON
     };
 })();

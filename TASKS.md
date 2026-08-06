@@ -23,6 +23,25 @@ Track per-task status. See `PLAN.md` for detail, `PROTOCOL.md` for contracts.
 - [x] Task 11: Color modes (Preserve working space / sRGB / Rec.709 / data-only)
 - [x] Task 12: TTL cleanup, error matrix, installer, docs
 
+## Phase 4 — Video transport + export range fixes
+
+- [x] Task 13: Chunked upload (begin/chunk/finish) + Range result download with
+      bounded memory; server verifies size on finish and the panel verifies
+      assets via GET /jobs before queueing
+- [x] Task 14: Video export renders the comp over the selected layer's in/out
+      range (frame-quantized); manifest `range_source="layer_in_out"`
+- [x] Task 15: Mask comp built from `comp.duplicate()` pruned to the dependency
+      closure; lives until AME finishes/cancels (cleanup in
+      `exportVideoStatus`-done and `cancelVideo`, never in export success)
+- [x] Task 16: Preflight-first flow: workflow fetch + `validateWorkflow` +
+      `validateNodeInputs` (cached `/object_info`, degrades to log-only)
+      happen before any AE/AME render or upload; ComfyUI `node_errors`
+      formatted readably
+- [x] Task 17: Diagnostics — panelLog covers export range, upload/download
+      progress, errors; server prints upload/download activity;
+      `/ae_bridge/health` exposes job-store module identity; `get_asset` errors
+      carry module + known job ids
+
 ## Acceptance checklist
 
 - [ ] PNG + alpha still → placed above selected layer

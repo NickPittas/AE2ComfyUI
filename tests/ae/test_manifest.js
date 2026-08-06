@@ -51,18 +51,36 @@ assert.strictEqual(m.project_working_space, "HDTV (Rec. 709)");
 assert.strictEqual(m.linear_blending, true);
 assert.ok(m.timeline_end_seconds_exclusive > m.timeline_start_seconds);
 
-// --- video always uses the full composition, even with a work area ---
+// --- video: selected layer in/out, frame-quantized ---
 let ctxWA = Object.assign({}, baseCtx, { has_work_area: true });
 m = AE2CManifest.buildManifest(Object.assign({}, baseOpts, { media_type: "video" }), ctxWA);
-assert.deepStrictEqual(AE2CManifest.validateManifest(m), [], "full-comp manifest valid");
-assert.strictEqual(m.range_source, "comp");
-assert.strictEqual(m.timeline_start_seconds, 0);
-assert.strictEqual(m.duration_seconds, 20.0);
-assert.strictEqual(m.frame_count, Math.round(20.0 * ctxWA.fps));
-assert.strictEqual(m.timeline_end_seconds_exclusive, 20.0);
+assert.deepStrictEqual(AE2CManifest.validateManifest(m), [], "layer-range manifest valid");
+assert.strictEqual(m.range_source, "layer_in_out");
+assert.strictEqual(Math.round(m.timeline_start_seconds * ctxWA.fps), Math.round(3.0 * ctxWA.fps));
+assert.strictEqual(Math.round(m.timeline_end_seconds_exclusive * ctxWA.fps), Math.round(9.0 * ctxWA.fps));
+assert.strictEqual(m.frame_count, Math.round(6.0 * ctxWA.fps));
+assert.ok(Math.abs(m.duration_seconds - 6.0) < 0.1, "duration matches layer span");
+assert.ok(m.timeline_end_seconds_exclusive > m.timeline_start_seconds);
 
-// --- selected-layer in/out never crops video transport ---
-m = AE2CManifest.buildManifest(Object.assign({}, baseOpts, { media_type: "video" }), baseCtx);
+// --- video: sub-frame in/out quantize to frame boundaries ---
+let ctxSub = Object.assign({}, baseCtx, {
+    selected_layer_in: 3.02, selected_layer_out: 8.98
+});
+m = AE2CManifest.buildManifest(Object.assign({}, baseOpts, { media_type: "video" }), ctxSub);
+assert.strictEqual(m.range_source, "layer_in_out");
+assert.strictEqual(Math.round(m.timeline_start_seconds * baseCtx.fps), Math.round(3.02 * baseCtx.fps));
+assert.strictEqual(Math.round(m.timeline_end_seconds_exclusive * baseCtx.fps), Math.round(8.98 * baseCtx.fps));
+
+// --- video: layer out beyond comp clamps to comp duration ---
+let ctxOut = Object.assign({}, baseCtx, { selected_layer_in: 3.0, selected_layer_out: 30.0 });
+m = AE2CManifest.buildManifest(Object.assign({}, baseOpts, { media_type: "video" }), ctxOut);
+assert.strictEqual(m.range_source, "layer_in_out");
+assert.strictEqual(Math.round(m.timeline_end_seconds_exclusive * baseCtx.fps), Math.round(20.0 * baseCtx.fps));
+assert.strictEqual(m.frame_count, Math.round(17.0 * baseCtx.fps));
+
+// --- video: empty/inverted layer range falls back to comp ---
+let ctxEmpty = Object.assign({}, baseCtx, { selected_layer_in: 5.0, selected_layer_out: 5.0 });
+m = AE2CManifest.buildManifest(Object.assign({}, baseOpts, { media_type: "video" }), ctxEmpty);
 assert.strictEqual(m.range_source, "comp");
 assert.strictEqual(m.timeline_start_seconds, 0);
 assert.strictEqual(m.duration_seconds, 20.0);

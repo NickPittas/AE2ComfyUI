@@ -142,6 +142,45 @@
         return { prompt: patched, filled_prompt_nodes: filledPromptNodes };
     }
 
+    /* Validate that every node's required inputs (from ComfyUI /object_info)
+     * are present in the prompt graph. `objectInfo` is keyed by class_type;
+     * unknown class types are collected separately (not fatal — the graph
+     * may reference nodes the running ComfyUI does not know about, which
+     * ComfyUI's own validation reports at queue time). */
+    function validateNodeInputs(prompt, objectInfo) {
+        var errors = [];
+        var unknown = [];
+        if (!prompt || typeof prompt !== "object") {
+            return { errors: ["workflow has no prompt graph"], unknown: unknown };
+        }
+        objectInfo = objectInfo || {};
+        for (var id in prompt) {
+            var node = prompt[id];
+            if (!node || typeof node !== "object") {
+                errors.push("node " + id + " is not an object");
+                continue;
+            }
+            var cls = node.class_type;
+            if (!cls) {
+                errors.push("node " + id + " has no class_type");
+                continue;
+            }
+            var info = objectInfo[cls];
+            if (!info) {
+                unknown.push(cls);
+                continue;
+            }
+            var required = (info.input && info.input.required) || {};
+            var inputs = node.inputs || {};
+            for (var key in required) {
+                if (!(key in inputs)) {
+                    errors.push("node " + id + " (" + cls + ") missing required input '" + key + "'");
+                }
+            }
+        }
+        return { errors: errors, unknown: unknown };
+    }
+
     var API = {
         FROM_TYPES: FROM_TYPES,
         TO_TYPES: TO_TYPES,
@@ -149,6 +188,7 @@
         nodeIdsOfType: nodeIdsOfType,
         outputConsumers: outputConsumers,
         validateWorkflow: validateWorkflow,
+        validateNodeInputs: validateNodeInputs,
         patchWorkflow: patchWorkflow
     };
     root.AE2CPatch = API;

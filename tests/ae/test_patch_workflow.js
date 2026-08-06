@@ -86,4 +86,46 @@ assert.strictEqual(out.prompt["4"].inputs.text, "already set");
 assert.deepStrictEqual(out.prompt["5"].inputs.text, ["1", 2]);
 assert.strictEqual(out.filled_prompt_nodes, 1);
 
+// --- validateNodeInputs against object_info ---
+const objectInfo = {
+    FromAEVideo: { input: { required: { job_id: ["STRING", {}], asset_id: ["STRING", {}] } } },
+    ToAEVideo: { input: { required: {
+        image: ["IMAGE"], job_id: ["STRING", {}],
+        video_meta_json: ["STRING", {}], filename_prefix: ["STRING", {}],
+        format_override: ["STRING", {}], mov_codec_override: ["STRING", {}]
+    } } },
+    KSampler: { input: { required: { seed: ["INT", {}], steps: ["INT", {}] } } }
+};
+let ni = Patch.validateNodeInputs(passthroughVideo, objectInfo);
+assert.deepStrictEqual(ni.errors, [], "video passthrough has all required inputs");
+assert.deepStrictEqual(ni.unknown, [], "all node types known");
+
+// node missing a required input
+const broken = JSON.parse(JSON.stringify(passthroughVideo));
+delete broken["2"].inputs.filename_prefix;
+ni = Patch.validateNodeInputs(broken, objectInfo);
+assert.ok(ni.errors.some(e => e.includes("2") && e.includes("filename_prefix")),
+    "missing required input flagged with node id and input name");
+
+// Bridge-injected inputs are present when validation runs after patching.
+const repairedForPreflight = Patch.patchWorkflow(broken, {
+    job_id: "preflight-job", asset_id: "main", manifest: {}
+});
+ni = Patch.validateNodeInputs(repairedForPreflight.prompt, objectInfo);
+assert.deepStrictEqual(ni.errors, [], "patched queue-time fields pass preflight");
+
+// unknown class types collected, not fatal
+ni = Patch.validateNodeInputs({ "9": { class_type: "NoSuchNode", inputs: {} } }, objectInfo);
+assert.deepStrictEqual(ni.errors, []);
+assert.deepStrictEqual(ni.unknown, ["NoSuchNode"]);
+
+// non-object prompt
+ni = Patch.validateNodeInputs(null, objectInfo);
+assert.ok(ni.errors.length === 1);
+
+// object_info unavailable: nothing known, nothing reported
+ni = Patch.validateNodeInputs(passthroughVideo, null);
+assert.deepStrictEqual(ni.errors, []);
+assert.ok(ni.unknown.length >= 2);
+
 console.log("test_patch_workflow.js: all assertions passed");
