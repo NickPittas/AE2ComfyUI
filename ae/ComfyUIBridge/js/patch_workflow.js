@@ -173,7 +173,22 @@
             var required = (info.input && info.input.required) || {};
             var inputs = node.inputs || {};
             for (var key in required) {
-                if (!(key in inputs)) {
+                var present = key in inputs;
+                var spec = required[key];
+                var inputType = spec && spec.length ? String(spec[0] || "") : "";
+                // ComfyUI dynamic/autogrow inputs are flattened in API
+                // prompts (for example `values.a`) even though object_info
+                // advertises the required container as `values`.
+                if (!present && inputType.indexOf("COMFY_AUTOGROW") === 0) {
+                    var prefix = key + ".";
+                    for (var inputKey in inputs) {
+                        if (inputKey.indexOf(prefix) === 0) {
+                            present = true;
+                            break;
+                        }
+                    }
+                }
+                if (!present) {
                     errors.push("node " + id + " (" + cls + ") missing required input '" + key + "'");
                 }
             }

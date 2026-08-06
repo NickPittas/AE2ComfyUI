@@ -94,7 +94,11 @@ const objectInfo = {
         video_meta_json: ["STRING", {}], filename_prefix: ["STRING", {}],
         format_override: ["STRING", {}], mov_codec_override: ["STRING", {}]
     } } },
-    KSampler: { input: { required: { seed: ["INT", {}], steps: ["INT", {}] } } }
+    KSampler: { input: { required: { seed: ["INT", {}], steps: ["INT", {}] } } },
+    ComfyMathExpression: { input: { required: {
+        expression: ["STRING", {}],
+        values: ["COMFY_AUTOGROW_V3", { template: {}, min: 1 }]
+    } } }
 };
 let ni = Patch.validateNodeInputs(passthroughVideo, objectInfo);
 assert.deepStrictEqual(ni.errors, [], "video passthrough has all required inputs");
@@ -113,6 +117,21 @@ const repairedForPreflight = Patch.patchWorkflow(broken, {
 });
 ni = Patch.validateNodeInputs(repairedForPreflight.prompt, objectInfo);
 assert.deepStrictEqual(ni.errors, [], "patched queue-time fields pass preflight");
+
+// Dynamic autogrow containers are flattened by graphToPrompt (`values.a`).
+ni = Patch.validateNodeInputs({
+    "10": {
+        class_type: "ComfyMathExpression",
+        inputs: { expression: "2*a", "values.a": ["1", 0] }
+    }
+}, objectInfo);
+assert.deepStrictEqual(ni.errors, [], "flattened autogrow input satisfies required container");
+
+ni = Patch.validateNodeInputs({
+    "10": { class_type: "ComfyMathExpression", inputs: { expression: "2*a" } }
+}, objectInfo);
+assert.ok(ni.errors.some(e => e.includes("values")),
+    "autogrow container with no dynamic values remains invalid");
 
 // unknown class types collected, not fatal
 ni = Patch.validateNodeInputs({ "9": { class_type: "NoSuchNode", inputs: {} } }, objectInfo);
