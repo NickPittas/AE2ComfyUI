@@ -1038,30 +1038,31 @@ var AE2C = (function () {
 
             var footage = _importFile(resultPath);
 
-            // Hard validation: no silent geometry/time drift.
-            var problems = [];
+            // Models may legitimately quantize spatial and temporal geometry
+            // (for example video dimensions or 8n+1 frame counts). Record the
+            // variance for diagnostics, but import the actual model output.
+            var warnings = [];
             if (footage.width !== manifest.width || footage.height !== manifest.height) {
-                problems.push("dimensions " + footage.width + "x" + footage.height +
+                warnings.push("dimensions " + footage.width + "x" + footage.height +
                     " != manifest " + manifest.width + "x" + manifest.height);
             }
+            var actualFps = manifest.fps;
+            var actualFrames = 0;
             if (manifest.media_type === "video") {
                 try {
-                    var fpsDelta = Math.abs((footage.frameRate || manifest.fps) - manifest.fps);
+                    actualFps = footage.frameRate || manifest.fps;
+                    var fpsDelta = Math.abs(actualFps - manifest.fps);
                     if (fpsDelta > 0.05) {
-                        problems.push("fps " + footage.frameRate + " != " + manifest.fps);
+                        warnings.push("fps " + actualFps + " != " + manifest.fps);
                     }
-                    var resultFrames = footage.duration * manifest.fps;
-                    if (Math.abs(resultFrames - manifest.frame_count) > 1.5) {
-                        problems.push("frame count ~" + Math.round(resultFrames) +
+                    actualFrames = Math.round(footage.duration * actualFps);
+                    if (Math.abs(actualFrames - manifest.frame_count) > 1.5) {
+                        warnings.push("frame count ~" + actualFrames +
                             " != " + manifest.frame_count);
                     }
                 } catch (e) {
-                    problems.push("cannot verify fps/duration: " + _errorText(e));
+                    warnings.push("cannot inspect fps/duration: " + _errorText(e));
                 }
-            }
-            if (problems.length) {
-                try { footage.remove(); } catch (e) {}
-                return _err("result mismatch: " + problems.join("; "));
             }
 
             var layer = comp.layers.add(footage);
@@ -1092,7 +1093,13 @@ var AE2C = (function () {
                 ok: true,
                 layer_index: layer.index,
                 layer_name: layer.name,
-                placed_at_seconds: anchor
+                placed_at_seconds: anchor,
+                actual_width: footage.width,
+                actual_height: footage.height,
+                actual_fps: actualFps,
+                actual_frame_count: actualFrames,
+                actual_duration_seconds: footage.duration,
+                warnings: warnings
             });
         } catch (e) {
             return _err("importResult failed: " + _errorText(e));

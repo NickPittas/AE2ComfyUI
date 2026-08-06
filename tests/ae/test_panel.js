@@ -69,6 +69,10 @@ assert.ok(document.body.style.webkitTransform.indexOf("translateZ") === 0);
     assert.ok(hostSource.indexOf('var mode = (offset === 0 || !dest.exists) ? "w" : "a";') !== -1);
     assert.ok(hostSource.indexOf('writeFileChunkFromFile: destination size') !== -1);
     assert.ok(hostSource.indexOf('writeFileChunkFromFile: seek failed') === -1);
+    assert.ok(hostSource.indexOf('warnings: warnings') !== -1,
+        "model geometry/time variance is returned as diagnostics");
+    assert.ok(hostSource.indexOf('return _err("result mismatch:') === -1,
+        "model geometry/time variance does not block import");
 }
 
 // ---------------------------------------------------------------------------

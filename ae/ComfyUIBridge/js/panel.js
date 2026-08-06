@@ -948,6 +948,10 @@
                             manifest: manifest,
                             result_path: r.outPath
                         })) + ")").then(function (imp) {
+                            if (imp.warnings && imp.warnings.length) {
+                                panelLog("IMPORT VARIANCE", choices.job_id + " " +
+                                    imp.warnings.join("; "));
+                            }
                             return { outPath: r.outPath, imp: imp };
                         });
                     });
