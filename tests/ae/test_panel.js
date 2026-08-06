@@ -33,6 +33,9 @@ const panel = require("../../ae/ComfyUIBridge/js/panel.js");
 
 function el(id) { return document.getElementById(id); }
 
+assert.strictEqual(panel.checksumBytes(new Uint8Array([0, 1, 254, 255])), 510,
+    "bounded host chunk checksum covers binary edge bytes");
+
 // ---------------------------------------------------------------------------
 // AME may rewrite the requested container extension (for example MOV -> MP4).
 // The panel must upload the file AME actually produced and keep metadata honest.

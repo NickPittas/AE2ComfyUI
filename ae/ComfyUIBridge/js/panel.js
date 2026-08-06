@@ -239,7 +239,8 @@
 
     // --- chunked file IO (bounded-memory video transport) -------------------
 
-    var CHUNK_BYTES = 4 * 1024 * 1024;          // transport chunk size
+    var CHUNK_BYTES = 4 * 1024 * 1024;          // Node-fs transport chunk size
+    var HOST_CHUNK_BYTES = 256 * 1024;           // bounded CEP/ExtendScript handoff
     var LEGACY_MAX_WHOLE_FILE = 64 * 1024 * 1024; // cep.fs whole-file fallback cap
     var lastProgressLogAt = 0;
 
@@ -256,6 +257,12 @@
         return btoa(bin);
     }
 
+    function checksumBytes(bytes) {
+        var sum = 0;
+        for (var i = 0; i < bytes.length; i++) sum = (sum + bytes[i]) % 4294967296;
+        return sum;
+    }
+
     function readChunkNode(path, offset, size) {
         var fs = nodeFs();
         var fd = fs.openSync(path, "r");
@@ -269,11 +276,23 @@
     }
 
     function readChunkHost(path, offset, size) {
-        return hostCall("readFileChunk(" + JSON.stringify(JSON.stringify({
-            path: path, offset: offset, size: size
+        var tempPath = path + ".ae2c-read-" + offset + "-" + Date.now() + ".tmp";
+        return hostCall("readFileChunkToFile(" + JSON.stringify(JSON.stringify({
+            path: path, temp_path: tempPath, offset: offset, size: size
         })) + ")").then(function (r) {
-            if (!r.base64) throw new Error("AE host returned no chunk data");
-            return base64ToBytes(r.base64);
+            var result = window.cep.fs.readFile(tempPath, window.cep.encoding.Base64);
+            if (result.err !== 0) throw new Error("cannot read temporary chunk " + tempPath);
+            var bytes = base64ToBytes(result.data);
+            if (bytes.length !== r.bytes) {
+                throw new Error("temporary chunk size mismatch at " + offset +
+                    ": host " + r.bytes + ", panel " + bytes.length);
+            }
+            if (checksumBytes(bytes) !== r.checksum) {
+                throw new Error("temporary chunk checksum mismatch at " + offset);
+            }
+            return bytes;
+        }).finally(function () {
+            deleteFile(tempPath);
         });
     }
 
@@ -288,9 +307,16 @@
     }
 
     function writeChunkHost(path, offset, bytes) {
-        return hostCall("writeFileChunk(" + JSON.stringify(JSON.stringify({
-            path: path, offset: offset, data: bytesToBase64(bytes)
-        })) + ")");
+        var tempPath = path + ".ae2c-write-" + offset + "-" + Date.now() + ".tmp";
+        var result = window.cep.fs.writeFile(
+            tempPath, bytesToBase64(bytes), window.cep.encoding.Base64
+        );
+        if (result.err !== 0) return Promise.reject(new Error("cannot write temporary chunk " + tempPath));
+        return hostCall("writeFileChunkFromFile(" + JSON.stringify(JSON.stringify({
+            path: path, temp_path: tempPath, offset: offset
+        })) + ")").finally(function () {
+            deleteFile(tempPath);
+        });
     }
 
     function fileSizeBytes(path) {
@@ -323,10 +349,12 @@
         var fs = nodeFs();
         return fileSizeBytes(path).then(function (fileSize) {
             var reader;
+            var chunkSize = CHUNK_BYTES;
             if (fs) {
                 reader = function (offset, size) { return readChunkNode(path, offset, size); };
             } else if (hostBridgeAvailable()) {
                 reader = function (offset, size) { return readChunkHost(path, offset, size); };
+                chunkSize = HOST_CHUNK_BYTES;
             } else if (fileSize <= LEGACY_MAX_WHOLE_FILE) {
                 panelLog("UPLOAD LEGACY", "no chunk reader; whole-file upload of " +
                     fileSize + " bytes for " + path);
@@ -341,7 +369,7 @@
             return client.uploadAssetChunked(jobId, assetId, fileSize,
                 path.split(/[\\/]/).pop(), manifest, reader,
                 function (p) { throttledProgressLog("UPLOAD PROGRESS", jobId, p.uploaded, p.total); },
-                CHUNK_BYTES);
+                chunkSize);
         });
     }
 
@@ -387,13 +415,13 @@
     // stills use the existing whole-file path (small).
     function downloadResultToPath(client, jobId, outPath, mediaType) {
         if (mediaType === "video") {
+            var resultFs = nodeFs();
             return client.downloadResultChunked(jobId, function (offset, bytes) {
-                var fs = nodeFs();
-                if (fs) { writeChunkNode(outPath, offset, bytes); return null; }
+                if (resultFs) { writeChunkNode(outPath, offset, bytes); return null; }
                 return writeChunkHost(outPath, offset, bytes);
             }, function (p) {
                 throttledProgressLog("DOWNLOAD PROGRESS", jobId, p.downloaded, p.total);
-            }, CHUNK_BYTES).then(function (info) {
+            }, resultFs ? CHUNK_BYTES : HOST_CHUNK_BYTES).then(function (info) {
                 panelLog("DOWNLOAD DONE", jobId + " total=" + info.total);
                 return { outPath: outPath, meta: info.meta };
             });
@@ -943,6 +971,7 @@
             hostCall: hostCall,
             panelLogPath: panelLogPath,
             reconcileAmeOutput: reconcileAmeOutput,
+            checksumBytes: checksumBytes,
             resetHostForTests: function () { hostReadyPromise = null; }
         };
     }

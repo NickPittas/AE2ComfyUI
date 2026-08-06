@@ -177,6 +177,50 @@ var AE2C = (function () {
         }
     }
 
+    // Copy one bounded binary chunk to a temporary file. The CEP side reads
+    // that small file with its native Base64 implementation, avoiding the
+    // prohibitively slow multi-megabyte hand-rolled ExtendScript encoder.
+    function readFileChunkToFile(optsJSON) {
+        try {
+            var opts = JSON.parse(optsJSON);
+            var path = String(opts.path || "");
+            var tempPath = String(opts.temp_path || "");
+            var offset = Number(opts.offset || 0);
+            var size = Number(opts.size || 0);
+            var source = new File(path);
+            if (!source.exists) return _err("readFileChunkToFile: file not found: " + path);
+            source.encoding = "binary";
+            if (!source.open("r")) return _err("readFileChunkToFile: cannot open " + path);
+            var text = "";
+            try {
+                if (offset > 0 && !source.seek(offset, 0)) {
+                    return _err("readFileChunkToFile: seek failed at " + offset);
+                }
+                text = source.read(size);
+            } finally {
+                source.close();
+            }
+            var checksum = 0;
+            for (var i = 0; i < text.length; i++) {
+                var code = text.charCodeAt(i);
+                if (code > 255) {
+                    return _err("readFileChunkToFile: binary fidelity check failed at " +
+                        (offset + i));
+                }
+                checksum = (checksum + code) % 4294967296;
+            }
+            var temp = new File(tempPath);
+            temp.encoding = "binary";
+            if (!temp.open("w")) return _err("readFileChunkToFile: cannot open temp " + tempPath);
+            try { temp.write(text); } finally { temp.close(); }
+            return JSON.stringify({
+                ok: true, path: tempPath, bytes: text.length, checksum: checksum
+            });
+        } catch (e) {
+            return _err("readFileChunkToFile failed: " + _errorText(e));
+        }
+    }
+
     function writeFileChunk(optsJSON) {
         try {
             var opts = JSON.parse(optsJSON);
@@ -199,6 +243,39 @@ var AE2C = (function () {
             }
         } catch (e) {
             return _err("writeFileChunk failed: " + _errorText(e));
+        }
+    }
+
+    // Mirror of readFileChunkToFile for bounded result downloads. CEP writes
+    // a small temporary binary file natively; ExtendScript copies it at the
+    // requested destination offset without carrying Base64 through evalScript.
+    function writeFileChunkFromFile(optsJSON) {
+        try {
+            var opts = JSON.parse(optsJSON);
+            var path = String(opts.path || "");
+            var tempPath = String(opts.temp_path || "");
+            var offset = Number(opts.offset || 0);
+            var temp = new File(tempPath);
+            if (!temp.exists) return _err("writeFileChunkFromFile: temp file not found: " + tempPath);
+            temp.encoding = "binary";
+            if (!temp.open("r")) return _err("writeFileChunkFromFile: cannot open temp " + tempPath);
+            var text = "";
+            try { text = temp.read(); } finally { temp.close(); }
+            var dest = new File(path);
+            dest.encoding = "binary";
+            var mode = (offset === 0 || !dest.exists) ? "w" : "r+";
+            if (!dest.open(mode)) return _err("writeFileChunkFromFile: cannot open " + path);
+            try {
+                if (offset > 0 && !dest.seek(offset, 0)) {
+                    return _err("writeFileChunkFromFile: seek failed at " + offset);
+                }
+                dest.write(text);
+            } finally {
+                dest.close();
+            }
+            return JSON.stringify({ ok: true, bytes: text.length });
+        } catch (e) {
+            return _err("writeFileChunkFromFile failed: " + _errorText(e));
         }
     }
 
@@ -1029,7 +1106,9 @@ var AE2C = (function () {
         manifestFieldsJSON: manifestFieldsJSON,
         setupTemplatesJSON: setupTemplatesJSON,
         readFileChunk: readFileChunk,
+        readFileChunkToFile: readFileChunkToFile,
         writeFileChunk: writeFileChunk,
+        writeFileChunkFromFile: writeFileChunkFromFile,
         fileSizeJSON: fileSizeJSON
     };
 })();
