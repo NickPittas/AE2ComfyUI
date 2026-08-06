@@ -108,7 +108,8 @@
 
     /* ctx: {
      *   job_id, asset_id, prompt_text, manifest (object|null),
-     *   image_filename_prefix, video_filename_prefix
+     *   image_filename_prefix, video_filename_prefix,
+     *   video_format, mov_codec
      * } */
     function patchWorkflow(prompt, ctx) {
         var patched = JSON.parse(JSON.stringify(prompt));
@@ -132,6 +133,13 @@
                 _setScalar(inputs, "filename_prefix",
                     ctx.video_filename_prefix || "ae_video_result");
                 _setScalar(inputs, "video_meta_json", metaJson);
+                // The AE panel is authoritative for the requested result
+                // container/codec. Do not let a saved workflow widget value
+                // silently override what the user selected in the panel.
+                _setScalar(inputs, "format_override",
+                    ctx.video_format || (ctx.manifest && ctx.manifest.video_format) || "auto");
+                _setScalar(inputs, "mov_codec_override",
+                    ctx.mov_codec || (ctx.manifest && ctx.manifest.mov_codec) || "auto");
             } else if (node.class_type === "CLIPTextEncode" &&
                        ctx.prompt_text && !isLink(inputs.text) &&
                        String(inputs.text || "").trim() === "") {

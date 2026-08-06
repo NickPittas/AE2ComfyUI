@@ -103,6 +103,38 @@ function jsonResp(data, status = 200, headers = {}) {
     assert.strictEqual(entry.status.completed, true);
     assert.ok(ticks >= 2);
 
+    // waitForCompletion: ComfyUI websocket progress is forwarded while
+    // history polling remains authoritative for completion.
+    let wsInstance;
+    class FakeWebSocket {
+        constructor(url) {
+            this.url = url;
+            this.closed = false;
+            wsInstance = this;
+            setTimeout(() => {
+                if (this.onmessage) this.onmessage({ data: JSON.stringify({
+                    type: "progress",
+                    data: { prompt_id: "pid-ws", node: "42", value: 3, max: 10 }
+                }) });
+            }, 1);
+        }
+        close() { this.closed = true; }
+    }
+    let wsTicks = 0;
+    const wsProgress = [];
+    fetch = mockFetch([{
+        match: "/history/pid-ws",
+        response: { ok: true, status: 200, headers: { get: () => null },
+            json: async () => (++wsTicks >= 3
+                ? { "pid-ws": { status: { completed: true } } }
+                : {}) }
+    }]);
+    client = new ComfyClient("http://h:1", fetch, FakeWebSocket);
+    await client.waitForCompletion("pid-ws", p => wsProgress.push(p), 5, "client one");
+    assert.strictEqual(wsInstance.url, "ws://h:1/ws?clientId=client%20one");
+    assert.ok(wsProgress.some(p => p.value === 3 && p.max === 10 && p.node === "42"));
+    assert.strictEqual(wsInstance.closed, true, "websocket closed after completion");
+
     // waitForCompletion: error surfaced
     fetch = mockFetch([{
         match: "/history/pid-e",

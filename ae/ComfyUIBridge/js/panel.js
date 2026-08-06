@@ -368,7 +368,10 @@
             panelLog("UPLOAD START", jobId + " " + assetId + " size=" + fileSize);
             return client.uploadAssetChunked(jobId, assetId, fileSize,
                 path.split(/[\\/]/).pop(), manifest, reader,
-                function (p) { throttledProgressLog("UPLOAD PROGRESS", jobId, p.uploaded, p.total); },
+                function (p) {
+                    setProgress(p.uploaded, p.total);
+                    throttledProgressLog("UPLOAD PROGRESS", jobId, p.uploaded, p.total);
+                },
                 chunkSize);
         });
     }
@@ -420,6 +423,7 @@
                 if (resultFs) { writeChunkNode(outPath, offset, bytes); return null; }
                 return writeChunkHost(outPath, offset, bytes);
             }, function (p) {
+                setProgress(p.downloaded, p.total);
                 throttledProgressLog("DOWNLOAD PROGRESS", jobId, p.downloaded, p.total);
             }, resultFs ? CHUNK_BYTES : HOST_CHUNK_BYTES).then(function (info) {
                 panelLog("DOWNLOAD DONE", jobId + " total=" + info.total);
@@ -472,6 +476,14 @@
         el.className = cls || "";
     }
 
+    function setProgress(value, max) {
+        var bar = $("progress");
+        var total = Number(max || 0);
+        var done = Number(value || 0);
+        bar.max = total > 0 ? total : 1;
+        bar.value = total > 0 ? Math.max(0, Math.min(done, total)) : 0;
+    }
+
     var runState = { running: false, jobId: null, client: null, cancelRequested: false };
 
     function setRunning(running) {
@@ -480,6 +492,7 @@
         $("btn-queue").classList.toggle("hidden", running);
         $("btn-cancel").classList.toggle("hidden", !running);
         $("progress").classList.toggle("hidden", !running);
+        setProgress(0, 1);
     }
 
     function checkCancelled() {
@@ -705,8 +718,9 @@
             exportResult.mask_path = status.mask_path;
         }
         if (status.video_format && status.video_format !== manifest.video_format) {
-            changes.push("format " + manifest.video_format + " -> " + status.video_format);
-            manifest.video_format = status.video_format;
+            changes.push("source transport format " + status.video_format +
+                " (requested result remains " + manifest.video_format + ")");
+            manifest.source_video_format = status.video_format;
         }
         return changes;
     }
@@ -765,7 +779,9 @@
                             job_id: choices.job_id,
                             asset_id: "main",
                             prompt_text: choices.prompt,
-                            manifest: {}
+                            manifest: {},
+                            video_format: choices.video_format,
+                            mov_codec: choices.mov_codec
                         }).prompt;
                         var check = AE2CPatch.validateNodeInputs(preflightPrompt, info);
                         if (check.errors.length) {
@@ -844,6 +860,7 @@
                 }
                 checkCancelled();
                 setStatus(statusEl, "Uploading assets…");
+                setProgress(0, 1);
                 return uploadAssets(client, choices, exportResult, manifest);
             })
             .then(function () {
@@ -853,20 +870,36 @@
                     job_id: choices.job_id,
                     asset_id: "main",
                     prompt_text: choices.prompt,
-                    manifest: manifest
+                    manifest: manifest,
+                    video_format: choices.video_format,
+                    mov_codec: choices.mov_codec
                 });
                 setStatus(statusEl, "Queueing in ComfyUI…");
                 return client.queuePrompt(patched.prompt, workflow.client_id);
             })
             .then(function (q) {
                 setStatus(statusEl, "ComfyUI running…");
+                setProgress(0, 1);
                 return client.waitForCompletion(q.prompt_id, function (p) {
-                    if (p.pending) setStatus(statusEl, "In ComfyUI queue…");
-                });
+                    if (p.pending) {
+                        setStatus(statusEl, "In ComfyUI queue…");
+                    } else if (p.max > 0) {
+                        setProgress(p.value, p.max);
+                        var pct = Math.round(100 * p.value / p.max);
+                        setStatus(statusEl, "ComfyUI rendering… " + pct + "%" +
+                            (p.node !== null && p.node !== undefined
+                                ? " (node " + p.node + ")" : ""));
+                    } else if (p.running) {
+                        setStatus(statusEl, "ComfyUI rendering…" +
+                            (p.node !== null && p.node !== undefined
+                                ? " node " + p.node : ""));
+                    }
+                }, 2000, workflow.client_id);
             })
             .then(function () {
                 checkCancelled();
                 setStatus(statusEl, "Downloading result…");
+                setProgress(0, 1);
                 var ext = choices.media_type === "video"
                     ? choices.video_format : choices.image_format;
                 var outDir = pathJoin(choices.resultFolder, choices.job_id);
@@ -874,6 +907,12 @@
                 var outPath = pathJoin(outDir, "result." + ext);
                 return downloadResultToPath(client, choices.job_id, outPath, choices.media_type)
                     .then(function (r) {
+                        if (choices.media_type === "video" && r.meta && r.meta.format &&
+                                r.meta.format !== choices.video_format) {
+                            throw new Error("ComfyUI returned " + r.meta.format.toUpperCase() +
+                                " but the AE panel requested " +
+                                choices.video_format.toUpperCase());
+                        }
                         setStatus(statusEl, "Importing into comp…");
                         return hostCall("importResult(" + JSON.stringify(JSON.stringify({
                             manifest: manifest,

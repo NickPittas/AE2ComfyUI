@@ -37,8 +37,8 @@ assert.strictEqual(panel.checksumBytes(new Uint8Array([0, 1, 254, 255])), 510,
     "bounded host chunk checksum covers binary edge bytes");
 
 // ---------------------------------------------------------------------------
-// AME may rewrite the requested container extension (for example MOV -> MP4).
-// The panel must upload the file AME actually produced and keep metadata honest.
+// AME may rewrite the source transport extension (for example MOV -> MP4).
+// The panel must upload the actual file without changing the requested result.
 // ---------------------------------------------------------------------------
 {
     const exported = { main_path: "/tmp/job/main.mov", mask_path: "/tmp/job/mask.mp4" };
@@ -50,8 +50,19 @@ assert.strictEqual(panel.checksumBytes(new Uint8Array([0, 1, 254, 255])), 510,
     });
     assert.strictEqual(exported.main_path, "/tmp/job/main.mp4");
     assert.strictEqual(exported.mask_path, "/tmp/job/mask.mp4");
-    assert.strictEqual(manifest.video_format, "mp4");
+    assert.strictEqual(manifest.video_format, "mov");
+    assert.strictEqual(manifest.source_video_format, "mp4");
     assert.strictEqual(changes.length, 2);
+}
+
+// ExtendScript uses append mode for sequential binary writes. Node/POSIX r+
+// caused the real CEP download to truncate and fail on the third chunk.
+{
+    const hostSource = fs.readFileSync(path.join(
+        __dirname, "../../ae/ComfyUIBridge/jsx/host.jsx"), "utf8");
+    assert.ok(hostSource.indexOf('var mode = (offset === 0 || !dest.exists) ? "w" : "a";') !== -1);
+    assert.ok(hostSource.indexOf('writeFileChunkFromFile: destination size') !== -1);
+    assert.ok(hostSource.indexOf('writeFileChunkFromFile: seek failed') === -1);
 }
 
 // ---------------------------------------------------------------------------

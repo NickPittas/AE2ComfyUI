@@ -58,11 +58,14 @@ assert.strictEqual(passthroughImage["1"].inputs.job_id, "");
 // --- patch video workflow: meta injected only when scalar ---
 out = Patch.patchWorkflow(passthroughVideo, {
     job_id: "job-v", asset_id: "main", manifest,
-    video_filename_prefix: "vid"
+    video_filename_prefix: "vid",
+    video_format: "mov", mov_codec: "prores_4444"
 });
 const toVideo = out.prompt["2"];
 assert.strictEqual(toVideo.inputs.job_id, "job-v");
 assert.strictEqual(toVideo.inputs.filename_prefix, "vid");
+assert.strictEqual(toVideo.inputs.format_override, "mov");
+assert.strictEqual(toVideo.inputs.mov_codec_override, "prores_4444");
 // video_meta_json is a LINK to FromAEVideo output 7 -> must stay a link
 assert.deepStrictEqual(toVideo.inputs.video_meta_json, ["1", 7]);
 

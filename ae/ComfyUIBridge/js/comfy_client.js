@@ -13,9 +13,10 @@
 
     var DEFAULT_CHUNK_BYTES = 4 * 1024 * 1024; // 4 MiB per request body
 
-    function ComfyClient(baseUrl, fetchImpl) {
+    function ComfyClient(baseUrl, fetchImpl, webSocketImpl) {
         this.baseUrl = String(baseUrl).replace(/\/+$/, "");
         this._fetch = fetchImpl || (typeof fetch !== "undefined" ? fetch.bind(root) : null);
+        this._WebSocket = webSocketImpl === undefined ? root.WebSocket : webSocketImpl;
         if (!this._fetch) throw new Error("no fetch implementation available");
     }
 
@@ -249,30 +250,83 @@
             });
     };
 
-    /* Poll /history until the prompt appears with status, calling
-     * onProgress({running}) each tick. Rejects on error status. */
-    ComfyClient.prototype.waitForCompletion = function (promptId, onProgress, intervalMs) {
+    /* Listen to ComfyUI's websocket for node/frame progress while polling
+     * /history as the authoritative completion/error fallback. */
+    ComfyClient.prototype.waitForCompletion = function (promptId, onProgress, intervalMs, clientId) {
         var self = this;
         var interval = intervalMs || 2000;
         return new Promise(function (resolve, reject) {
+            var settled = false;
+            var timer = null;
+            var socket = null;
+
+            function cleanup() {
+                if (timer !== null) clearTimeout(timer);
+                if (socket) {
+                    try { socket.close(); } catch (ignored) {}
+                    socket = null;
+                }
+            }
+
+            function finish(fn, value) {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                fn(value);
+            }
+
+            function schedule() {
+                if (!settled) timer = setTimeout(tick, interval);
+            }
+
+            if (clientId && self._WebSocket) {
+                try {
+                    var wsUrl = self.baseUrl.replace(/^http/i, "ws") +
+                        "/ws?clientId=" + encodeURIComponent(clientId);
+                    socket = new self._WebSocket(wsUrl);
+                    socket.onmessage = function (event) {
+                        var message;
+                        try { message = JSON.parse(event.data); } catch (ignoredParse) { return; }
+                        var data = message.data || {};
+                        if (data.prompt_id && String(data.prompt_id) !== String(promptId)) return;
+                        if (message.type === "progress" && onProgress) {
+                            onProgress({
+                                running: true,
+                                value: Number(data.value || 0),
+                                max: Number(data.max || 0),
+                                node: data.node === undefined ? null : data.node
+                            });
+                        } else if (message.type === "executing" && onProgress) {
+                            onProgress({ running: true, node: data.node });
+                        } else if (message.type === "execution_error") {
+                            finish(reject, new Error(data.exception_message || data.error ||
+                                "ComfyUI execution error"));
+                        }
+                    };
+                    socket.onerror = function () {};
+                } catch (ignoredSocketError) {
+                    socket = null;
+                }
+            }
+
             function tick() {
                 self.getHistory(promptId).then(function (hist) {
                     var entry = hist && hist[promptId];
                     if (!entry) {
                         if (onProgress) onProgress({ pending: true });
-                        return setTimeout(tick, interval);
+                        return schedule();
                     }
                     var status = entry.status || {};
-                    if (status.completed) return resolve(entry);
+                    if (status.completed) return finish(resolve, entry);
                     if (status.status_str === "error" || status.status === "error") {
                         var msgs = (status.messages || []).map(function (m) {
                             return Array.isArray(m) ? (m[1] && (m[1].exception_message || m[1].error)) : m;
                         }).filter(Boolean).join("; ");
-                        return reject(new Error(msgs || "ComfyUI execution error"));
+                        return finish(reject, new Error(msgs || "ComfyUI execution error"));
                     }
                     if (onProgress) onProgress({ running: true, status: status });
-                    setTimeout(tick, interval);
-                }).catch(reject);
+                    schedule();
+                }).catch(function (error) { finish(reject, error); });
             }
             tick();
         });

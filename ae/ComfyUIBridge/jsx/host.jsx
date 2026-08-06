@@ -228,13 +228,16 @@ var AE2C = (function () {
             var offset = Number(opts.offset || 0);
             var f = new File(path);
             f.encoding = "binary";
-            // offset 0 (re)creates/truncates; later chunks append in place.
-            var mode = (offset === 0 || !f.exists) ? "w" : "r+";
+            // Downloads are sequential. Validate the requested offset against
+            // the closed file length, then use ExtendScript's append mode.
+            // "r+" is a Node/POSIX mode and is not reliable in ExtendScript.
+            if (offset > 0 && (!f.exists || f.length !== offset)) {
+                return _err("writeFileChunk: destination size " +
+                    (f.exists ? f.length : -1) + " does not match offset " + offset);
+            }
+            var mode = (offset === 0 || !f.exists) ? "w" : "a";
             if (!f.open(mode)) return _err("writeFileChunk: cannot open " + path + " (" + mode + ")");
             try {
-                if (offset > 0 && !f.seek(offset, 0)) {
-                    return _err("writeFileChunk: seek failed at " + offset);
-                }
                 var text = _b64decode(String(opts.data || ""));
                 f.write(text);
                 return JSON.stringify({ ok: true, bytes: text.length });
@@ -263,12 +266,13 @@ var AE2C = (function () {
             try { text = temp.read(); } finally { temp.close(); }
             var dest = new File(path);
             dest.encoding = "binary";
-            var mode = (offset === 0 || !dest.exists) ? "w" : "r+";
-            if (!dest.open(mode)) return _err("writeFileChunkFromFile: cannot open " + path);
+            if (offset > 0 && (!dest.exists || dest.length !== offset)) {
+                return _err("writeFileChunkFromFile: destination size " +
+                    (dest.exists ? dest.length : -1) + " does not match offset " + offset);
+            }
+            var mode = (offset === 0 || !dest.exists) ? "w" : "a";
+            if (!dest.open(mode)) return _err("writeFileChunkFromFile: cannot open " + path + " (" + mode + ")");
             try {
-                if (offset > 0 && !dest.seek(offset, 0)) {
-                    return _err("writeFileChunkFromFile: seek failed at " + offset);
-                }
                 dest.write(text);
             } finally {
                 dest.close();
