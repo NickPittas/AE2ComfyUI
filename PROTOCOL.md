@@ -166,9 +166,10 @@ Written by AE into the staging folder and uploaded with every asset.
 ## Mask convention
 
 ComfyUI MASK: `0 = keep, 1 = process/edit`.
-The main asset is always the full comp. The separate mask asset is the selected
-layer's resulting alpha after AE masks, rendered as white (`1`) on black (`0`)
-at full-comp dimensions and duration. `invert` is applied AE-side before export.
+The main asset is always the full comp. The separate mask asset is full-comp
+dimensions and duration. Normal `use` mode inverts the selected layer's
+resulting alpha so AE's transparent/masked area becomes white/editable;
+`invert` mode changes the opaque/outside area instead.
 
 ## Result import (AE side)
 

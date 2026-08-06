@@ -33,6 +33,11 @@ const baseOpts = {
     bridge_color_mode: "preserve_working_space"
 };
 
+// Normal AE masking cuts an area out (alpha 0), but ComfyUI edits white (1).
+assert.strictEqual(AE2CManifest.maskModeInvertsAlpha("use"), true);
+assert.strictEqual(AE2CManifest.maskModeInvertsAlpha("invert"), false);
+assert.strictEqual(AE2CManifest.maskModeInvertsAlpha("none"), false);
+
 // --- still image manifest ---
 let m = AE2CManifest.buildManifest(baseOpts, baseCtx);
 assert.deepStrictEqual(AE2CManifest.validateManifest(m), [], "still manifest valid");

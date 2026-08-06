@@ -100,9 +100,10 @@ and current AE versions include H.264 Output Module presets at 5, 15, and
   prompt.
 - Masks: the full-comp `IMAGE` and selected-layer `MASK` are separate assets
   with identical comp dimensions (and identical frame count for video). The
-  mask is the selected layer's resulting alpha after its AE masks, rendered
-  white-on-black; ComfyUI receives `0=keep, 1=process/edit`. `Invert` flips it
-  AE-side before export.
+  normal **Change AE-masked area** mode inverts the layer's resulting alpha,
+  making AE's transparent/cut-out mask region white for ComfyUI. ComfyUI
+  receives `0=keep, 1=process/edit`; **Change outside AE mask** uses the
+  opposite polarity.
 - Connect `From AE: mask` / `From AE Video: mask` to the workflow's actual
   inpaint or mask-conditioning input (for example `InpaintModelConditioning`,
   `VAE Encode (for Inpainting)`, or `Set Latent Noise Mask`). Connecting it

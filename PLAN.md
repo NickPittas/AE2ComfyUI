@@ -77,9 +77,10 @@ Result is registered in the job store for panel download.
 
 ## Mask convention
 
-ComfyUI MASK: `0 = keep, 1 = process/edit`. The separate carrier is the
-selected layer's masked alpha rendered white-on-black at full-comp geometry.
-Mask modes in the panel: `none | use | invert`. Inversion happens AE-side.
+ComfyUI MASK: `0 = keep, 1 = process/edit`. The separate carrier is full-comp
+geometry. Normal `use` mode inverts the selected layer alpha so AE's
+transparent/masked region becomes white/editable; `invert` changes the
+opaque/outside region instead.
 
 ## Timeline placement
 

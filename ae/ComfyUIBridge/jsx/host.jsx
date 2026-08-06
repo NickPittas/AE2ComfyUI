@@ -342,7 +342,7 @@ var AE2C = (function () {
             var maskPath = "";
             if (manifest.mask_mode !== "none") {
                 maskComp = _buildMaskComp(
-                    comp, layer, manifest.mask_mode === "invert",
+                    comp, layer, _manifestLib.maskModeInvertsAlpha(manifest.mask_mode),
                     "AE2C Mask " + manifest.job_id
                 );
                 // Masks are data: always preserve RGB.
@@ -577,7 +577,7 @@ var AE2C = (function () {
 
             if (maskPath) {
                 maskComp = _buildMaskComp(
-                    comp, layer, manifest.mask_mode === "invert",
+                    comp, layer, _manifestLib.maskModeInvertsAlpha(manifest.mask_mode),
                     "AE2C Mask " + manifest.job_id
                 );
                 // Render the same comp-space interval as the main video. The

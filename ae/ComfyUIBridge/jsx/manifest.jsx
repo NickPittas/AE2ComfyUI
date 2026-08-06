@@ -25,6 +25,13 @@ var AE2CManifest = (function () {
         preserve_working_space: true, srgb: true, rec709: true, preserve_rgb: true
     };
 
+    // AE's masked/cut-out area is transparent (alpha 0), while ComfyUI edits
+    // white mask values (1). Normal mask use therefore inverts layer alpha.
+    // The alternate mode changes the opaque/outside area instead.
+    function maskModeInvertsAlpha(mode) {
+        return mode === "use";
+    }
+
     /* opts: panel choices (job_id, media_type, placement, mask_mode, prompt,
      *   image/video formats, bridge_color_mode)
      * ctx: AE context from getContextJSON (width/height/fps/current_time/
@@ -111,7 +118,8 @@ var AE2CManifest = (function () {
     return {
         MANIFEST_FIELDS: MANIFEST_FIELDS,
         buildManifest: buildManifest,
-        validateManifest: validateManifest
+        validateManifest: validateManifest,
+        maskModeInvertsAlpha: maskModeInvertsAlpha
     };
 })();
 
