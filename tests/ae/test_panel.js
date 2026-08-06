@@ -34,6 +34,24 @@ const panel = require("../../ae/ComfyUIBridge/js/panel.js");
 function el(id) { return document.getElementById(id); }
 
 // ---------------------------------------------------------------------------
+// AME may rewrite the requested container extension (for example MOV -> MP4).
+// The panel must upload the file AME actually produced and keep metadata honest.
+// ---------------------------------------------------------------------------
+{
+    const exported = { main_path: "/tmp/job/main.mov", mask_path: "/tmp/job/mask.mp4" };
+    const manifest = { video_format: "mov" };
+    const changes = panel.reconcileAmeOutput(exported, manifest, {
+        main_path: "/tmp/job/main.mp4",
+        mask_path: "/tmp/job/mask.mp4",
+        video_format: "mp4"
+    });
+    assert.strictEqual(exported.main_path, "/tmp/job/main.mp4");
+    assert.strictEqual(exported.mask_path, "/tmp/job/mask.mp4");
+    assert.strictEqual(manifest.video_format, "mp4");
+    assert.strictEqual(changes.length, 2);
+}
+
+// ---------------------------------------------------------------------------
 // browseFolder — no CEP runtime
 // ---------------------------------------------------------------------------
 {

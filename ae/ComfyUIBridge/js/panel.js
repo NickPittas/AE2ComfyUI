@@ -653,7 +653,7 @@
                 }
                 hostCall("exportVideoStatus(" + JSON.stringify(JSON.stringify({ job_id: choices.job_id })) + ")")
                     .then(function (s) {
-                        if (s.done) return resolve();
+                        if (s.done) return resolve(s);
                         setStatus(statusEl,
                             "Rendering in Adobe Media Encoder… " +
                             Math.round(s.elapsed_ms / 1000) + "s");
@@ -663,6 +663,24 @@
             }
             tick();
         });
+    }
+
+    function reconcileAmeOutput(exportResult, manifest, status) {
+        var changes = [];
+        if (!status) return changes;
+        if (status.main_path && status.main_path !== exportResult.main_path) {
+            changes.push("main path " + exportResult.main_path + " -> " + status.main_path);
+            exportResult.main_path = status.main_path;
+        }
+        if (status.mask_path && status.mask_path !== exportResult.mask_path) {
+            changes.push("mask path " + exportResult.mask_path + " -> " + status.mask_path);
+            exportResult.mask_path = status.mask_path;
+        }
+        if (status.video_format && status.video_format !== manifest.video_format) {
+            changes.push("format " + manifest.video_format + " -> " + status.video_format);
+            manifest.video_format = status.video_format;
+        }
+        return changes;
     }
 
     function pollWorkflowCompat(workflowId, mediaType) {
@@ -789,7 +807,13 @@
                 }
                 if (choices.media_type === "video") return waitForAmeExport(choices);
             })
-            .then(function () {
+            .then(function (ameStatus) {
+                if (choices.media_type === "video") {
+                    var ameChanges = reconcileAmeOutput(exportResult, manifest, ameStatus);
+                    if (ameChanges.length) {
+                        panelLog("AME OUTPUT ADJUSTED", ameChanges.join("; "));
+                    }
+                }
                 checkCancelled();
                 setStatus(statusEl, "Uploading assets…");
                 return uploadAssets(client, choices, exportResult, manifest);
@@ -918,6 +942,7 @@
             ensureHost: ensureHost,
             hostCall: hostCall,
             panelLogPath: panelLogPath,
+            reconcileAmeOutput: reconcileAmeOutput,
             resetHostForTests: function () { hostReadyPromise = null; }
         };
     }

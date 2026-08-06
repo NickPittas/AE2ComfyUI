@@ -782,6 +782,8 @@ var AE2C = (function () {
             _videoJobs[manifest.job_id] = {
                 main_path: mainPath,
                 mask_path: maskPath,
+                manifest_path: manifestPath,
+                manifest: manifest,
                 mask_comp: maskComp,
                 sizes: {},
                 stable: {},
@@ -833,15 +835,48 @@ var AE2C = (function () {
         return job.stable[path] >= 1; // unchanged across two polls
     }
 
+    function _resolveAmeOutputPath(requestedPath) {
+        var requested = new File(requestedPath);
+        if (requested.exists && requested.length > 0) return requestedPath;
+        var lower = String(requestedPath).toLowerCase();
+        var alternate = "";
+        if (/\.mov$/.test(lower)) {
+            alternate = String(requestedPath).substring(0, String(requestedPath).length - 4) + ".mp4";
+        } else if (/\.mp4$/.test(lower)) {
+            alternate = String(requestedPath).substring(0, String(requestedPath).length - 4) + ".mov";
+        }
+        if (alternate) {
+            var alternateFile = new File(alternate);
+            if (alternateFile.exists && alternateFile.length > 0) return alternate;
+        }
+        return requestedPath;
+    }
+
+    function _videoFormatFromPath(path) {
+        var lower = String(path || "").toLowerCase();
+        if (/\.mp4$/.test(lower)) return "mp4";
+        if (/\.mov$/.test(lower)) return "mov";
+        return "";
+    }
+
     function exportVideoStatus(optsJSON) {
         try {
             var opts = JSON.parse(optsJSON);
             var job = _videoJobs[opts.job_id];
             if (!job) return _err("unknown video job: " + opts.job_id);
-            var mainDone = _fileStable(job, job.main_path);
-            var maskDone = !job.mask_path || _fileStable(job, job.mask_path);
+            var actualMainPath = _resolveAmeOutputPath(job.main_path);
+            var actualMaskPath = job.mask_path
+                ? _resolveAmeOutputPath(job.mask_path) : "";
+            var mainDone = _fileStable(job, actualMainPath);
+            var maskDone = !actualMaskPath || _fileStable(job, actualMaskPath);
             var elapsed = new Date().getTime() - job.started;
             if (mainDone && maskDone) {
+                var actualFormat = _videoFormatFromPath(actualMainPath);
+                if (actualFormat && job.manifest &&
+                        job.manifest.video_format !== actualFormat) {
+                    job.manifest.video_format = actualFormat;
+                    _writeFile(job.manifest_path, JSON.stringify(job.manifest, null, 2));
+                }
                 // AME is done with the mask comp; release it now.
                 _cleanupVideoJob(job, opts.job_id);
                 return JSON.stringify({
@@ -849,6 +884,9 @@ var AE2C = (function () {
                     done: true,
                     main_ready: true,
                     mask_ready: true,
+                    main_path: actualMainPath,
+                    mask_path: actualMaskPath,
+                    video_format: actualFormat,
                     elapsed_ms: elapsed
                 });
             }
