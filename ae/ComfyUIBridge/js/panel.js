@@ -499,6 +499,36 @@
         if (runState.cancelRequested) throw new Error("cancelled");
     }
 
+    // AE 26 / CEP 12 can initialize the DOM successfully but leave the panel
+    // surface black. Toggling a compositor-only style forces CEF to invalidate
+    // and repaint without changing layout or panel state.
+    var repaintFlip = false;
+    function forcePanelRepaint() {
+        if (typeof document === "undefined" || !document.body) return;
+        repaintFlip = !repaintFlip;
+        document.body.style.webkitTransform = repaintFlip
+            ? "translateZ(0)" : "translateZ(0.001px)";
+        document.body.style.opacity = "0.9999";
+        // Force style/layout evaluation before restoring full opacity.
+        document.body.offsetHeight;
+        setTimeout(function () {
+            if (document.body) document.body.style.opacity = "1";
+        }, 20);
+    }
+
+    function installRepaintRecovery() {
+        forcePanelRepaint();
+        setTimeout(forcePanelRepaint, 100);
+        setTimeout(forcePanelRepaint, 500);
+        if (typeof window.addEventListener === "function") {
+            window.addEventListener("focus", forcePanelRepaint);
+            window.addEventListener("resize", forcePanelRepaint);
+        }
+        document.addEventListener("visibilitychange", function () {
+            if (!document.hidden) forcePanelRepaint();
+        });
+    }
+
     // --- Tabs --------------------------------------------------------------
     function showTab(name) {
         var gen = name === "generate";
@@ -951,6 +981,7 @@
     // --- init ---------------------------------------------------------------
 
     function init() {
+        installRepaintRecovery();
         $("tab-generate").addEventListener("click", function () { showTab("generate"); });
         $("tab-settings").addEventListener("click", function () { showTab("settings"); });
         $("btn-save-settings").addEventListener("click", saveSettings);
@@ -1011,6 +1042,7 @@
             panelLogPath: panelLogPath,
             reconcileAmeOutput: reconcileAmeOutput,
             checksumBytes: checksumBytes,
+            forcePanelRepaint: forcePanelRepaint,
             resetHostForTests: function () { hostReadyPromise = null; }
         };
     }

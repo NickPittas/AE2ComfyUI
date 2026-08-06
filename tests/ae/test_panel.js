@@ -36,6 +36,12 @@ function el(id) { return document.getElementById(id); }
 assert.strictEqual(panel.checksumBytes(new Uint8Array([0, 1, 254, 255])), 510,
     "bounded host chunk checksum covers binary edge bytes");
 
+// Repaint recovery must be harmless in the test DOM and force a compositor
+// style change rather than modifying panel content/state.
+global.document.body = { style: {}, offsetHeight: 10 };
+panel.forcePanelRepaint();
+assert.ok(document.body.style.webkitTransform.indexOf("translateZ") === 0);
+
 // ---------------------------------------------------------------------------
 // AME may rewrite the source transport extension (for example MOV -> MP4).
 // The panel must upload the actual file without changing the requested result.
