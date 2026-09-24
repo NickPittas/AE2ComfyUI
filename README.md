@@ -48,8 +48,10 @@ Restart ComfyUI and AE. In AE: **Window > Extensions > AE2ComfyUI**.
    placement. **Queue in ComfyUI**.
 4. The panel exports stills directly as PNG or queues video through Adobe
    Media Encoder, uploads to ComfyUI, patches the workflow with the job data, runs
-   it, downloads the result, and places it above the selected layer (or top
-   of comp) anchored to the export's timeline start.
+   it, copies the local ComfyUI video output into the configured AE results
+   folder, and places it above the selected layer (or top of comp) anchored to
+   the export's timeline start. Video delivery requires both apps to see
+   ComfyUI's output path; failed copies are reported instead of downloaded.
 
 ## AE output templates
 
@@ -60,7 +62,7 @@ source template and reports anything that still needs user setup.
 | bridge template | use | setup |
 |---|---|---|
 | `AE2C ProRes 4444` | MOV with alpha | Auto-created from an installed ProRes 4444 template (normally `High Quality with Alpha`) |
-| `AE2C ProRes 422 HQ` | MOV, RGB only | Auto-created if AE already exposes a 422 HQ template; otherwise create it once using the instructions below |
+| `AE2C ProRes 422 HQ` | MOV, RGB only | Auto-created from an installed `422 HQ`, `Apple ProRes 422 HQ`, or `ProRes 422 HQ` template; otherwise create it once using the instructions below |
 | `AE2C H.264 15 Mbps` | MP4 and video masks | Auto-created from AE's built-in 15 Mbps H.264 template (40 or 5 Mbps fallback) |
 
 PNG and JPEG Output Module templates are **not required**. AE-to-ComfyUI
@@ -93,11 +95,15 @@ and current AE versions include H.264 Output Module presets at 5, 15, and
 
 - Every workflow needs matching `FromAE`/`ToAE` (image) or
   `FromAEVideo`/`ToAEVideo` (video) nodes; the panel validates before queue.
-- `job_id` / `asset_id` / `video_meta_json` are injected by the panel — leave
-  them at defaults in the graph.
-- Prompt: wire the `FromAE` `prompt` STRING output into your text encoders.
-  As a fallback, empty `CLIPTextEncode` text fields are filled with the panel
-  prompt.
+- `job_id` / `asset_id` are injected by the panel — leave them at defaults.
+- Prompt: wire the `prompt` STRING output from `FromAE` or `FromAEVideo` into
+  your text encoder. `FromAEVideo` exposes the AE panel prompt directly. As a
+  fallback, empty `CLIPTextEncode` text fields are filled with the panel prompt.
+- Video metadata: connect `FromAEVideo.video_meta_json` to the optional
+  `ToAEVideo.video_meta_json` socket when you want the connection visible in the
+  graph. If it is unconnected, `ToAEVideo` reads the same metadata from the AE
+  job automatically. Hover the node inputs for descriptions of the output
+  controls; the AE panel applies its selected container and ProRes codec.
 - Masks: the full-comp `IMAGE` and selected-layer `MASK` are separate assets
   with identical comp dimensions (and identical frame count for video). The
   normal **Change AE-masked area** mode inverts the layer's resulting alpha,
@@ -127,6 +133,8 @@ color metadata (BT.709 fallback) by `ToAEVideo`.
 
 - After Effects 2022+ with Adobe Media Encoder (video export).
 - ComfyUI (localhost or trusted LAN) with `ffmpeg`/`ffprobe` on its host.
+- Video return is copy-only: After Effects must be able to read ComfyUI's
+  configured output folder (same machine by default, or a shared filesystem path).
 - ComfyUI-side Python deps are ComfyUI-standard: `requests`, `Pillow`,
   `numpy`, `torch`.
 

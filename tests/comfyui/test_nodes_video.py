@@ -7,7 +7,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from comfyui.ae_bridge import job_store, video_io
+from comfyui.ae_bridge import job_store, nodes, video_io
 from comfyui.ae_bridge.nodes import FromAEVideo, ToAEVideo
 
 ffmpeg_missing = shutil.which("ffmpeg") is None
@@ -55,7 +55,7 @@ def seed_video_job(job_id="job-v1", with_mask=True):
 
 def test_from_ae_video_outputs_full_metadata():
     seed_video_job()
-    image, mask, w, h, count, fps, duration, meta_json = FromAEVideo().pull("job-v1", "main")
+    image, mask, w, h, count, fps, duration, meta_json, _prompt = FromAEVideo().pull("job-v1", "main")
     assert image.shape == (FRAMES, H, W, 3)
     assert mask.shape == (FRAMES, H, W)
     assert (w, h, count) == (W, H, FRAMES)
@@ -68,14 +68,14 @@ def test_from_ae_video_outputs_full_metadata():
 
 def test_from_ae_video_mask_values():
     seed_video_job(with_mask=True)
-    _, mask, _, _, _, _, _, _ = FromAEVideo().pull("job-v1", "main")
+    _, mask, _, _, _, _, _, _, _ = FromAEVideo().pull("job-v1", "main")
     assert float(mask[0, 0, 0]) > 0.8
     assert float(mask[0, 0, -1]) < 0.2
 
 
 def test_from_ae_video_no_mask_mode_returns_all_keep():
     seed_video_job(with_mask=False)
-    _, mask, _, _, count, _, _, _ = FromAEVideo().pull("job-v1", "main")
+    _, mask, _, _, count, _, _, _, _ = FromAEVideo().pull("job-v1", "main")
     assert mask.shape == (count, H, W)
     assert float(mask.max()) == 0.0
 
@@ -85,24 +85,40 @@ def test_from_ae_video_empty_job_id_raises():
         FromAEVideo().pull("", "main")
 
 
-def test_to_ae_video_writes_mov_result():
+def test_to_ae_video_writes_mov_result(tmp_path, monkeypatch):
     seed_video_job()
+    monkeypatch.setattr(nodes, "_comfy_output_dir", lambda: str(tmp_path))
     out_frames = make_frames()
     ToAEVideo().push(out_frames, "job-v1", "{}", "res", "auto", "auto")
     result = job_store.get_result("job-v1")
     assert result is not None
-    assert result["path"].endswith("res.mov")
+    assert result["path"].endswith("res.job-v1.mov")
+    assert result["path"].startswith(str(tmp_path))
     meta = result["metadata"]
     assert meta["format"] == "mov"
     assert meta["frame_count"] == FRAMES
     assert meta["fps"] == FPS
     assert meta["duration_seconds"] == pytest.approx(FRAMES / FPS)
+    assert meta["comfy_output_path"] == result["path"]
     probe = video_io.probe_video(result["path"])
     assert probe["nb_frames"] == FRAMES
 
 
-def test_to_ae_video_mask_writes_sidecar_mp4():
+def test_to_ae_video_does_not_fallback_when_output_folder_unavailable(monkeypatch):
     seed_video_job()
+
+    def unavailable_output_dir():
+        raise RuntimeError("output folder unavailable")
+
+    monkeypatch.setattr(nodes, "_comfy_output_dir", unavailable_output_dir)
+    with pytest.raises(RuntimeError, match="output folder unavailable"):
+        ToAEVideo().push(make_frames(), "job-v1", "{}", "res", "auto", "auto")
+    assert job_store.get_result("job-v1") is None
+
+
+def test_to_ae_video_mask_writes_sidecar_mp4(tmp_path, monkeypatch):
+    seed_video_job()
+    monkeypatch.setattr(nodes, "_comfy_output_dir", lambda: str(tmp_path))
     out_frames = make_frames()
     mask = torch.zeros((FRAMES, H, W), dtype=torch.float32)
     mask[:, :, : W // 2] = 1.0
@@ -114,8 +130,9 @@ def test_to_ae_video_mask_writes_sidecar_mp4():
     assert probe["nb_frames"] == FRAMES
 
 
-def test_to_ae_video_meta_json_overrides():
+def test_to_ae_video_meta_json_overrides(tmp_path, monkeypatch):
     seed_video_job()
+    monkeypatch.setattr(nodes, "_comfy_output_dir", lambda: str(tmp_path))
     meta = {"video_format": "mp4", "fps": 30.0}
     ToAEVideo().push(make_frames(), "job-v1", json.dumps(meta), "resx", "auto", "auto")
     result = job_store.get_result("job-v1")
@@ -183,7 +200,7 @@ def test_chunked_upload_decodes_in_from_ae_video():
     asyncio.run(run())
 
     # Consume the uploaded bytes exactly as a workflow would.
-    image, mask, w, h, count, fps, duration, meta_json = FromAEVideo().pull(
+    image, mask, w, h, count, fps, duration, meta_json, _prompt = FromAEVideo().pull(
         job_id, "main"
     )
     assert image.shape == (FRAMES, H, W, 3)

@@ -220,35 +220,5 @@ function jsonResp(data, status = 200, headers = {}) {
     assert.strictEqual(uploadProgress[uploadProgress.length - 1], uploadBytes.length,
         "progress reaches total");
 
-    // downloadResultChunked: Range requests reassemble exact bytes
-    const dlBytes = new Uint8Array((2 * 1024 * 1024) + 777).map((_, i) => (i * 13) % 256);
-    const dlMeta = { format: "mov", width: "64", height: "64", frameCount: "8", fps: "24", duration: "0.3333" };
-    const downloadMock = async (url, opts = {}) => {
-        const range = (opts.headers || {}).Range || "";
-        const m = /bytes=(\d+)-(\d+)/.exec(range);
-        if (!m) throw new Error("missing Range header");
-        const start = Number(m[1]), end = Number(m[2]);
-        const slice = dlBytes.slice(start, end + 1);
-        const ab = slice.buffer.slice(slice.byteOffset, slice.byteOffset + slice.byteLength);
-        return {
-            ok: true, status: 206,
-            headers: { get: (k) => ({
-                "Content-Range": `bytes ${start}-${end}/${dlBytes.length}`,
-                "X-AEBridge-Format": dlMeta.format, "X-AEBridge-Width": dlMeta.width,
-                "X-AEBridge-Height": dlMeta.height, "X-AEBridge-Frame-Count": dlMeta.frameCount,
-                "X-AEBridge-FPS": dlMeta.fps, "X-AEBridge-Duration": dlMeta.duration
-            })[k] || null },
-            arrayBuffer: async () => ab
-        };
-    };
-    const dlReceived = new Uint8Array(dlBytes.length);
-    const writeChunk = (offset, bytes) => { dlReceived.set(bytes, offset); return Promise.resolve(); };
-    client = new ComfyClient("http://h:1", downloadMock);
-    const dlC = await client.downloadResultChunked("jobv", writeChunk, null, 512 * 1024);
-    assert.strictEqual(dlC.total, dlBytes.length);
-    assert.strictEqual(dlC.meta.format, "mov");
-    assert.strictEqual(dlC.meta.frameCount, 8);
-    assert.deepStrictEqual(dlReceived, dlBytes, "download bytes reassembled exactly");
-
     console.log("test_comfy_client.js: all assertions passed");
 })().catch((e) => { console.error(e); process.exit(1); });

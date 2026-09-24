@@ -1,7 +1,7 @@
 /* AE2ComfyUI panel: UI wiring + end-to-end generate flow.
  *
  * Flow: context → export (still/video) → upload assets → patch workflow →
- * queue → wait → download result → import into comp at the manifest anchor.
+ * queue → wait → copy/download result → import into comp at the manifest anchor.
  *
  * Host access goes through evalScriptAsync, which works with Adobe's
  * CSInterface.js when present and falls back to window.__adobe_cep__.
@@ -103,10 +103,10 @@
     }
 
     /*
-     * AE 26 / CEP 12 can execute evalScript while delivering an empty callback.
-     * Have ExtendScript write its result to a unique file and read that file from
-     * CEP. The callback remains useful for diagnostics, but is not trusted as the
-     * data channel.
+     * Some AE 26 / CEP 12 builds deliver an empty evalScript callback, so the
+     * host also writes each result to a file. Prefer a complete callback when
+     * available; otherwise poll the file. The file can briefly be unavailable
+     * while ExtendScript is writing it, especially when staging is on a share.
      */
     function evalScriptAsync(script, label) {
         return new Promise(function (resolve, reject) {
@@ -126,6 +126,26 @@
                 "}())";
             var started = Date.now();
             var settled = false;
+            var responseReadError = null;
+            var responseReadErrorAt = 0;
+
+            function acceptResponse(raw, source) {
+                if (typeof raw !== "string" || !raw) return false;
+                var data;
+                try { data = JSON.parse(raw); }
+                catch (e) { return false; }
+                if (!data || typeof data !== "object" || typeof data.ok !== "boolean") {
+                    return false;
+                }
+                if (settled) return true;
+                settled = true;
+                try { deleteFile(responsePath); } catch (ignoredDeleteError) {}
+                panelLog("HOST " + source + " RESPONSE", (label || "unnamed call") +
+                    " bytes=" + raw.length + " value=" + raw.slice(0, 500));
+                try { resolve(parseHostResponse(raw, label)); }
+                catch (responseError) { reject(responseError); }
+                return true;
+            }
 
             function fail(error) {
                 if (settled) return;
@@ -138,18 +158,19 @@
             function pollResponse() {
                 if (settled) return;
                 try {
-                    if (fileExists(responsePath)) {
+                    var responseExists = fileExists(responsePath);
+                    responseReadError = null;
+                    responseReadErrorAt = 0;
+                    if (responseExists) {
                         var raw = readTextFile(responsePath);
-                        deleteFile(responsePath);
-                        settled = true;
-                        panelLog("HOST FILE RESPONSE", (label || "unnamed call") +
-                            " bytes=" + raw.length + " value=" + String(raw).slice(0, 500));
-                        try { resolve(parseHostResponse(raw, label)); }
-                        catch (parseError) { reject(parseError); }
-                        return;
+                        if (acceptResponse(raw, "FILE")) return;
                     }
                 } catch (readError) {
-                    return fail(readError);
+                    if (!responseReadErrorAt) responseReadErrorAt = Date.now();
+                    responseReadError = readError;
+                    if (Date.now() - responseReadErrorAt >= 2000) {
+                        return fail(responseReadError);
+                    }
                 }
                 if (Date.now() - started >= HOST_RESPONSE_TIMEOUT_MS) {
                     return fail(new Error((label || "AE host") +
@@ -163,6 +184,7 @@
                     panelLog("HOST CALLBACK", (label || "unnamed call") +
                         " type=" + typeof raw + " bytes=" + String(raw || "").length +
                         " value=" + String(raw || "<empty>").slice(0, 500));
+                    if (acceptResponse(raw, "CALLBACK")) return;
                     pollResponse();
                 });
                 setTimeout(pollResponse, 0);
@@ -237,7 +259,7 @@
         if (result.err !== 0) throw new Error("cannot write " + path);
     }
 
-    // --- chunked file IO (bounded-memory video transport) -------------------
+    // --- chunked source-video reads for upload ------------------------------
 
     var CHUNK_BYTES = 4 * 1024 * 1024;          // Node-fs transport chunk size
     var HOST_CHUNK_BYTES = 256 * 1024;           // bounded CEP/ExtendScript handoff
@@ -249,12 +271,6 @@
         var bytes = new Uint8Array(bin.length);
         for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
         return bytes;
-    }
-
-    function bytesToBase64(bytes) {
-        var bin = "";
-        for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-        return btoa(bin);
     }
 
     function checksumBytes(bytes) {
@@ -292,29 +308,6 @@
             }
             return bytes;
         }).finally(function () {
-            deleteFile(tempPath);
-        });
-    }
-
-    function writeChunkNode(path, offset, bytes) {
-        var fs = nodeFs();
-        var fd = fs.openSync(path, offset === 0 ? "w" : "r+");
-        try {
-            fs.writeSync(fd, Buffer.from(bytes), 0, bytes.length, offset);
-        } finally {
-            fs.closeSync(fd);
-        }
-    }
-
-    function writeChunkHost(path, offset, bytes) {
-        var tempPath = path + ".ae2c-write-" + offset + "-" + Date.now() + ".tmp";
-        var result = window.cep.fs.writeFile(
-            tempPath, bytesToBase64(bytes), window.cep.encoding.Base64
-        );
-        if (result.err !== 0) return Promise.reject(new Error("cannot write temporary chunk " + tempPath));
-        return hostCall("writeFileChunkFromFile(" + JSON.stringify(JSON.stringify({
-            path: path, temp_path: tempPath, offset: offset
-        })) + ")").finally(function () {
             deleteFile(tempPath);
         });
     }
@@ -414,25 +407,73 @@
         });
     }
 
-    // Write the downloaded result to disk. Video streams via Range chunks;
-    // stills use the existing whole-file path (small).
-    function downloadResultToPath(client, jobId, outPath, mediaType) {
-        if (mediaType === "video") {
-            var resultFs = nodeFs();
-            return client.downloadResultChunked(jobId, function (offset, bytes) {
-                if (resultFs) { writeChunkNode(outPath, offset, bytes); return null; }
-                return writeChunkHost(outPath, offset, bytes);
-            }, function (p) {
-                setProgress(p.downloaded, p.total);
-                throttledProgressLog("DOWNLOAD PROGRESS", jobId, p.downloaded, p.total);
-            }, resultFs ? CHUNK_BYTES : HOST_CHUNK_BYTES).then(function (info) {
-                panelLog("DOWNLOAD DONE", jobId + " total=" + info.total);
-                return { outPath: outPath, meta: info.meta };
-            });
-        }
+    // Still image results are small and continue to use the HTTP endpoint.
+    function downloadResultToPath(client, jobId, outPath) {
         return client.downloadResult(jobId).then(function (dl) {
             writeFileBytes(outPath, dl.bytes);
             return { outPath: outPath, meta: dl.meta };
+        });
+    }
+
+    // ToAEVideo writes directly to ComfyUI's standard output folder. Copy the
+    // finished file to the configured AE results folder. Video delivery is
+    // intentionally copy-only, with no HTTP download fallback.
+    function copyLocalVideoResult(client, jobId, outPath, onCopy) {
+        var fs = nodeFs();
+        if (!fs || typeof fs.copyFile !== "function") {
+            return Promise.reject(new Error(
+                "local video copy unavailable: CEP Node.js filesystem is disabled; " +
+                "fully restart After Effects to load the updated bridge"
+            ));
+        }
+        return client.getJob(jobId).then(function (job) {
+            var meta = job && job.result && job.result.metadata;
+            var sourcePath = meta && meta.comfy_output_path;
+            if (!sourcePath) {
+                throw new Error(
+                    "ComfyUI did not report its output file path; restart ComfyUI " +
+                    "to load the updated AE bridge video node"
+                );
+            }
+            if (!fs.existsSync(sourcePath)) {
+                throw new Error("ComfyUI output file is not visible to After Effects: " + sourcePath);
+            }
+            var sourceStat = fs.statSync(sourcePath);
+            if (!sourceStat.isFile() || sourceStat.size <= 0) {
+                throw new Error("ComfyUI output file is empty or is not a file: " + sourcePath);
+            }
+            if (onCopy) onCopy(sourcePath);
+            return new Promise(function (resolve, reject) {
+                fs.copyFile(sourcePath, outPath, function (error) {
+                    if (error) return reject(error);
+                    try {
+                        var outputStat = fs.statSync(outPath);
+                        if (outputStat.size !== sourceStat.size) {
+                            throw new Error("local result copy size mismatch: source " +
+                                sourceStat.size + ", copy " + outputStat.size);
+                        }
+                        panelLog("LOCAL COPY DONE", jobId + " bytes=" + outputStat.size +
+                            " from=" + sourcePath + " to=" + outPath);
+                        resolve({
+                            outPath: outPath,
+                            meta: {
+                                format: meta.format || "",
+                                width: Number(meta.width) || 0,
+                                height: Number(meta.height) || 0,
+                                frameCount: Number(meta.frame_count) || 0,
+                                fps: Number(meta.fps) || 0,
+                                duration: Number(meta.duration_seconds) || 0
+                            }
+                        });
+                    } catch (copyError) {
+                        reject(copyError);
+                    }
+                });
+            });
+        }).catch(function (error) {
+            panelLog("LOCAL COPY ERROR", jobId + " " +
+                ((error && error.message) || String(error)));
+            throw error;
         });
     }
 
@@ -839,6 +880,15 @@
         try {
             choices = gatherChoices();
             choices.resultFolder = $("result-folder").value.trim() || Settings.get("resultFolder");
+            if (choices.media_type === "video") {
+                var copyFs = nodeFs();
+                if (!copyFs || typeof copyFs.copyFile !== "function") {
+                    throw new Error(
+                        "video delivery requires CEP Node.js file-copy support; " +
+                        "fully restart After Effects after updating the bridge"
+                    );
+                }
+            }
             workflowId = validateChoices(choices);
             pollWorkflowCompat(workflowId, choices.media_type);
         } catch (e) {
@@ -928,14 +978,26 @@
             })
             .then(function () {
                 checkCancelled();
-                setStatus(statusEl, "Downloading result…");
                 setProgress(0, 1);
                 var ext = choices.media_type === "video"
                     ? choices.video_format : choices.image_format;
                 var outDir = pathJoin(choices.resultFolder, choices.job_id);
                 ensureDir(outDir);
                 var outPath = pathJoin(outDir, "result." + ext);
-                return downloadResultToPath(client, choices.job_id, outPath, choices.media_type)
+                var resultPromise;
+                if (choices.media_type === "video") {
+                    setStatus(statusEl, "Copying ComfyUI output to AE results folder…");
+                    resultPromise = copyLocalVideoResult(client, choices.job_id, outPath,
+                        function () { setStatus(statusEl, "Copying video to AE results folder…"); })
+                        .then(function (localResult) {
+                            setProgress(1, 1);
+                            return localResult;
+                        });
+                } else {
+                    setStatus(statusEl, "Downloading result…");
+                    resultPromise = downloadResultToPath(client, choices.job_id, outPath);
+                }
+                return resultPromise
                     .then(function (r) {
                         if (choices.media_type === "video" && r.meta && r.meta.format &&
                                 r.meta.format !== choices.video_format) {

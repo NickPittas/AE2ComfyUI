@@ -93,9 +93,12 @@ diagnostic (`upload verification failed: claimed ...`). Response:
 
 ## `GET /ae_bridge/jobs/{job_id}/result`
 
-Streams result bytes after `ToAE` / `ToAEVideo` has run. `web.FileResponse`
-streams from disk; `Range` requests return `206` with `Content-Range`, so the
-panel downloads large videos in bounded-memory chunks.
+Streams result bytes after `ToAE` / `ToAEVideo` has run. `ToAEVideo` encodes
+MOV/MP4 directly into ComfyUI's standard output folder and includes that path
+in the job result metadata. The CEP panel copies that file into the configured
+AE results folder using its local filesystem. Video delivery is copy-only;
+both apps must be able to see ComfyUI's output path. Missing paths or copy
+errors are reported instead of hidden by an HTTP download.
 
 Headers:
 
@@ -171,11 +174,12 @@ Before POST `/prompt`, AE deep-copies the prompt and injects:
 |---|---|
 | `FromAE`, `FromAEVideo` | `job_id`, `asset_id` |
 | `ToAE` | `job_id`, `filename_prefix` |
-| `ToAEVideo` | `job_id`, `filename_prefix`, `video_meta_json` (serialized manifest) |
+| `ToAEVideo` | `job_id`, `filename_prefix`, optional `video_meta_json` (serialized manifest; otherwise read from the job store) |
 
-Prompt text: the `FromAE` `prompt` STRING output is the canonical prompt
-source inside the workflow. Additionally, when a workflow carries a
-`prompt_node_id` marker, AE patches that node's text input directly.
+Prompt text: the `FromAE` or `FromAEVideo` `prompt` STRING output is the
+canonical prompt source inside the workflow. Connect it to the workflow's text
+encoder. Additionally, when a workflow carries a `prompt_node_id` marker, AE
+patches that node's text input directly.
 
 ## job_manifest.json (exact fields)
 
@@ -231,6 +235,15 @@ finishes/cancels, then removed.
   the comp duration. Comp resolution/settings are untouched.
 - `comp` — video over the whole comp (used when no layer is selected or the
   layer range is empty/inverted).
+
+## Video node wiring
+
+`FromAEVideo` outputs the source frame batch and a `prompt` STRING containing
+the text entered in the AE panel. Connect that prompt to the workflow's video
+text encoder. Its `video_meta_json` output can be connected to the optional
+`ToAEVideo.video_meta_json` input. When left unconnected, `ToAEVideo` reads the
+same manifest from the job store. The AE panel supplies the job ID, requested
+container, and MOV codec at queue time.
 
 ## Result import (AE side)
 

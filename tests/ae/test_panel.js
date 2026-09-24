@@ -61,18 +61,27 @@ assert.ok(document.body.style.webkitTransform.indexOf("translateZ") === 0);
     assert.strictEqual(changes.length, 2);
 }
 
-// ExtendScript uses append mode for sequential binary writes. Node/POSIX r+
-// caused the real CEP download to truncate and fail on the third chunk.
+// Verify the CEP runtime is configured for the local video file copy path.
 {
+    const manifestSource = fs.readFileSync(path.join(
+        __dirname, "../../ae/ComfyUIBridge/CSXS/manifest.xml"), "utf8");
+    assert.ok(manifestSource.indexOf("<Parameter>--enable-nodejs</Parameter>") !== -1);
+    assert.ok(manifestSource.indexOf("<Parameter>--mixed-context</Parameter>") !== -1);
+    const panelSource = fs.readFileSync(path.join(
+        __dirname, "../../ae/ComfyUIBridge/js/panel.js"), "utf8");
+    assert.ok(panelSource.indexOf("LOCAL COPY ERROR") !== -1);
+    assert.ok(panelSource.indexOf("LOCAL COPY FALLBACK") === -1,
+        "video copy failures must not be swallowed by a transport fallback");
+    assert.ok(panelSource.indexOf("downloadResultChunked") === -1,
+        "video results must not use chunked HTTP downloads");
     const hostSource = fs.readFileSync(path.join(
         __dirname, "../../ae/ComfyUIBridge/jsx/host.jsx"), "utf8");
-    assert.ok(hostSource.indexOf('var mode = (offset === 0 || !dest.exists) ? "w" : "a";') !== -1);
-    assert.ok(hostSource.indexOf('writeFileChunkFromFile: destination size') !== -1);
-    assert.ok(hostSource.indexOf('writeFileChunkFromFile: seek failed') === -1);
     assert.ok(hostSource.indexOf('warnings: warnings') !== -1,
         "model geometry/time variance is returned as diagnostics");
     assert.ok(hostSource.indexOf('return _err("result mismatch:') === -1,
         "model geometry/time variance does not block import");
+    assert.ok(hostSource.indexOf('"Apple ProRes 422 HQ", "ProRes 422 HQ", "422 HQ"') !== -1,
+        "AE's short 422 HQ template name is accepted for ProRes output");
 }
 
 // ---------------------------------------------------------------------------

@@ -221,68 +221,6 @@ var AE2C = (function () {
         }
     }
 
-    function writeFileChunk(optsJSON) {
-        try {
-            var opts = JSON.parse(optsJSON);
-            var path = String(opts.path || "");
-            var offset = Number(opts.offset || 0);
-            var f = new File(path);
-            f.encoding = "binary";
-            // Downloads are sequential. Validate the requested offset against
-            // the closed file length, then use ExtendScript's append mode.
-            // "r+" is a Node/POSIX mode and is not reliable in ExtendScript.
-            if (offset > 0 && (!f.exists || f.length !== offset)) {
-                return _err("writeFileChunk: destination size " +
-                    (f.exists ? f.length : -1) + " does not match offset " + offset);
-            }
-            var mode = (offset === 0 || !f.exists) ? "w" : "a";
-            if (!f.open(mode)) return _err("writeFileChunk: cannot open " + path + " (" + mode + ")");
-            try {
-                var text = _b64decode(String(opts.data || ""));
-                f.write(text);
-                return JSON.stringify({ ok: true, bytes: text.length });
-            } finally {
-                f.close();
-            }
-        } catch (e) {
-            return _err("writeFileChunk failed: " + _errorText(e));
-        }
-    }
-
-    // Mirror of readFileChunkToFile for bounded result downloads. CEP writes
-    // a small temporary binary file natively; ExtendScript copies it at the
-    // requested destination offset without carrying Base64 through evalScript.
-    function writeFileChunkFromFile(optsJSON) {
-        try {
-            var opts = JSON.parse(optsJSON);
-            var path = String(opts.path || "");
-            var tempPath = String(opts.temp_path || "");
-            var offset = Number(opts.offset || 0);
-            var temp = new File(tempPath);
-            if (!temp.exists) return _err("writeFileChunkFromFile: temp file not found: " + tempPath);
-            temp.encoding = "binary";
-            if (!temp.open("r")) return _err("writeFileChunkFromFile: cannot open temp " + tempPath);
-            var text = "";
-            try { text = temp.read(); } finally { temp.close(); }
-            var dest = new File(path);
-            dest.encoding = "binary";
-            if (offset > 0 && (!dest.exists || dest.length !== offset)) {
-                return _err("writeFileChunkFromFile: destination size " +
-                    (dest.exists ? dest.length : -1) + " does not match offset " + offset);
-            }
-            var mode = (offset === 0 || !dest.exists) ? "w" : "a";
-            if (!dest.open(mode)) return _err("writeFileChunkFromFile: cannot open " + path + " (" + mode + ")");
-            try {
-                dest.write(text);
-            } finally {
-                dest.close();
-            }
-            return JSON.stringify({ ok: true, bytes: text.length });
-        } catch (e) {
-            return _err("writeFileChunkFromFile failed: " + _errorText(e));
-        }
-    }
-
     function fileSizeJSON(optsJSON) {
         try {
             var opts = JSON.parse(optsJSON);
@@ -666,7 +604,7 @@ var AE2C = (function () {
         ],
         prores_422hq: [
             AE2C_TEMPLATE_NAMES.prores_422hq,
-            "Apple ProRes 422 HQ", "ProRes 422 HQ"
+            "Apple ProRes 422 HQ", "ProRes 422 HQ", "422 HQ"
         ],
         mp4: [
             AE2C_TEMPLATE_NAMES.mp4,
@@ -720,7 +658,7 @@ var AE2C = (function () {
                     "Apple ProRes 4444", "ProRes 4444", "High Quality with Alpha"
                 ]),
                 _ensureTemplateAlias(om, AE2C_TEMPLATE_NAMES.prores_422hq, [
-                    "Apple ProRes 422 HQ", "ProRes 422 HQ"
+                    "Apple ProRes 422 HQ", "ProRes 422 HQ", "422 HQ"
                 ]),
                 _ensureTemplateAlias(om, AE2C_TEMPLATE_NAMES.mp4, [
                     "H.264 - Match Render Settings - 15 Mbps",
@@ -1118,8 +1056,6 @@ var AE2C = (function () {
         setupTemplatesJSON: setupTemplatesJSON,
         readFileChunk: readFileChunk,
         readFileChunkToFile: readFileChunkToFile,
-        writeFileChunk: writeFileChunk,
-        writeFileChunkFromFile: writeFileChunkFromFile,
         fileSizeJSON: fileSizeJSON
     };
 })();

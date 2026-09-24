@@ -195,6 +195,17 @@
                             break;
                         }
                     }
+                    // Some ComfyUI dynamic containers are intentionally empty.
+                    // TextEncodeQwenImage21, for example, allows zero reference
+                    // images (`min: 0`) for text-to-image generation.
+                    var dynamicMeta = spec[1] || {};
+                    var dynamicMin = dynamicMeta.min;
+                    if (typeof dynamicMin === "undefined" && dynamicMeta.template) {
+                        dynamicMin = dynamicMeta.template.min;
+                    }
+                    if (!present && Number(dynamicMin) === 0) {
+                        continue;
+                    }
                 }
                 if (!present) {
                     errors.push("node " + id + " (" + cls + ") missing required input '" + key + "'");

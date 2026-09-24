@@ -136,6 +136,20 @@ ni = Patch.validateNodeInputs({
 assert.ok(ni.errors.some(e => e.includes("values")),
     "autogrow container with no dynamic values remains invalid");
 
+// Optional dynamic containers may be omitted entirely. Qwen Image 2.1 uses
+// this shape for reference images and min=0 is valid for text-to-image.
+const optionalAutogrowInfo = {
+    TextEncodeQwenImage21: { input: { required: {
+        prompt: ["STRING", {}],
+        images: ["COMFY_AUTOGROW_V3", { template: { min: 0 } }]
+    } } }
+};
+ni = Patch.validateNodeInputs({
+    "11": { class_type: "TextEncodeQwenImage21", inputs: { prompt: "a simple prompt" } }
+}, optionalAutogrowInfo);
+assert.deepStrictEqual(ni.errors, [],
+    "optional autogrow container may be empty");
+
 // unknown class types collected, not fatal
 ni = Patch.validateNodeInputs({ "9": { class_type: "NoSuchNode", inputs: {} } }, objectInfo);
 assert.deepStrictEqual(ni.errors, []);

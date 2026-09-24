@@ -24,7 +24,7 @@ AE CEP Panel (ExtendScript + JS)
   ├── Fetch workflow (open tabs + saved files)  ──►  GET /ae_bridge/workflows
   ├── Patch prompt: inject job_id, prompt text, metadata into FromAE nodes
   ├── POST /prompt → ComfyUI queue
-  └── Poll /history → download result → import into comp at timeline anchor
+  └── Poll /history → copy local video / fetch still → import at timeline anchor
 
 ComfyUI custom_nodes/ae_bridge/
   ├── nodes.py              FromAE, ToAE, FromAEVideo, ToAEVideo
@@ -66,14 +66,16 @@ Output: `IMAGE` passthrough. PNG embeds mask as alpha when connected.
 Inputs: `job_id`, `asset_id`
 Outputs: `IMAGE` batch, `MASK` batch, `INT width`, `INT height`,
 `INT frame_count`, `FLOAT fps`, `FLOAT duration_seconds`,
-`STRING video_meta_json`
+`STRING video_meta_json`, `STRING prompt`
 
 ### `ToAEVideo` (OUTPUT_NODE)
-Inputs: `image` batch, optional `mask`, `job_id`, `video_meta_json`,
+Inputs: `image` batch, optional `mask`, `job_id`, optional `video_meta_json`,
 `filename_prefix`, `format_override: auto|mp4|mov`,
 `mov_codec_override: auto|prores_422hq|prores_4444`
 Output: `IMAGE` passthrough. Optional separate mask MP4 when mask connected.
-Result is registered in the job store for panel download.
+MOV/MP4 is encoded directly in ComfyUI's output folder and registered in the
+job store. AE copies the local file into its configured results folder. Video
+delivery is copy-only and reports an error if the shared local path is unavailable.
 
 ## Mask convention
 
@@ -238,7 +240,7 @@ optional direct CLIPTextEncode patch only when workflow carries a
 ### Task 10: Generate-tab orchestration
 Queue click: read UI → getContextJSON → build manifest → export → upload
 assets → getWorkflow → patch → validate AE nodes → queuePrompt → poll (ws →
-history fallback) → downloadResult → importResult at manifest anchor. Cancel
+history fallback) → copy video output / fetch still → importResult. Cancel
 stops monitoring + POSTs `/interrupt`. Disabled Queue while running.
 Actionable errors (missing AME template, ffmpeg missing, node mismatch,
 result frame mismatch).

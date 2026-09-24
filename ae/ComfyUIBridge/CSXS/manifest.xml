@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ExtensionManifest Version="10.0" ExtensionBundleId="com.npittas.ae2comfyui"
-                   ExtensionBundleVersion="1.0.0"
+                   ExtensionBundleVersion="1.0.6"
                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <ExtensionList>
-    <Extension Id="com.npittas.ae2comfyui.panel" Version="1.0.0"/>
+    <Extension Id="com.npittas.ae2comfyui.panel" Version="1.0.6"/>
   </ExtensionList>
   <ExecutionEnvironment>
     <HostList>
@@ -21,6 +21,10 @@
       <DispatchInfo>
         <Resources>
           <MainPath>./index.html</MainPath>
+          <CEFCommandLine>
+            <Parameter>--enable-nodejs</Parameter>
+            <Parameter>--mixed-context</Parameter>
+          </CEFCommandLine>
           <ScriptPath>./jsx/host.jsx</ScriptPath>
         </Resources>
         <Lifecycle>

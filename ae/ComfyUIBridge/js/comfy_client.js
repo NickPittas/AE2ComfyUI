@@ -4,9 +4,9 @@
  * File bytes are passed in by the caller so CEP can use cep.fs and tests can
  * use Node fs — this module stays transport-pure.
  *
- * Large videos move through the chunked begin/chunk/finish upload protocol and
- * Range-based chunked download; the caller supplies readChunk/writeChunk so
- * this module never base64-loads or buffers a whole video.
+ * Large video inputs use the chunked begin/chunk/finish upload protocol.
+ * Video results are copied from ComfyUI's local output folder by the panel;
+ * this client downloads only small still-image results.
  */
 (function (root) {
     "use strict";
@@ -166,67 +166,6 @@
                 body: JSON.stringify({ job_id: jobId, asset_id: assetId, size: fileSize })
             }).then(self._json);
         });
-    };
-
-    /* Download a result via Range requests without buffering the whole file.
-     *
-     * writeChunk(offset, bytes) must return a Promise or undefined;
-     * onProgress({downloaded, total}) is throttled by caller. Resolves
-     * {meta, total}. */
-    ComfyClient.prototype.downloadResultChunked = function (jobId, writeChunk, onProgress, chunkSizeBytes) {
-        var self = this;
-        var chunkSize = chunkSizeBytes || DEFAULT_CHUNK_BYTES;
-        var url = this.baseUrl + "/ae_bridge/jobs/" + encodeURIComponent(jobId) + "/result";
-        function parseMeta(resp) {
-            var h = resp.headers;
-            return {
-                format: h.get("X-AEBridge-Format") || "",
-                width: parseInt(h.get("X-AEBridge-Width") || "0", 10),
-                height: parseInt(h.get("X-AEBridge-Height") || "0", 10),
-                frameCount: parseInt(h.get("X-AEBridge-Frame-Count") || "0", 10),
-                fps: parseFloat(h.get("X-AEBridge-FPS") || "0"),
-                duration: parseFloat(h.get("X-AEBridge-Duration") || "0")
-            };
-        }
-        // Probe with a 1-byte Range to learn the total size from Content-Range.
-        return this._fetch(url, { cache: "no-store", headers: { "Range": "bytes=0-0" } })
-            .then(function (resp) {
-                if (!resp.ok && resp.status !== 206) {
-                    throw new Error("result not ready (HTTP " + resp.status + ")");
-                }
-                var cr = resp.headers.get("Content-Range") || "";
-                var m = /bytes\s+0-0\/(\d+)/.exec(cr);
-                var total = m ? parseInt(m[1], 10) : 0;
-                var meta = parseMeta(resp);
-                return resp.arrayBuffer().then(function () { return { total: total, meta: meta }; });
-            })
-            .then(function (info) {
-                if (!info.total) throw new Error("cannot determine result size (no Content-Range header)");
-                var offset = 0;
-                function next() {
-                    if (offset >= info.total) return info.meta;
-                    var end = Math.min(offset + chunkSize - 1, info.total - 1);
-                    return self._fetch(url, {
-                        cache: "no-store",
-                        headers: { "Range": "bytes=" + offset + "-" + end }
-                    }).then(function (resp) {
-                        if (!resp.ok && resp.status !== 206) {
-                            throw new Error("result download failed (HTTP " + resp.status + ")");
-                        }
-                        return resp.arrayBuffer().then(function (buf) {
-                            var bytes = new Uint8Array(buf);
-                            return Promise.resolve(writeChunk(offset, bytes)).then(function () {
-                                offset += bytes.length;
-                                if (onProgress) onProgress({ downloaded: offset, total: info.total });
-                                return next();
-                            });
-                        });
-                    });
-                }
-                return next().then(function (meta) {
-                    return { meta: meta, total: info.total };
-                });
-            });
     };
 
     /* Resolves {bytes: Uint8Array, meta: {format,width,height,frameCount,fps,duration}}. */
