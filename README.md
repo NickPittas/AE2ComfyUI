@@ -8,6 +8,17 @@ Architecture, contracts, and task tracking live in `PLAN.md`, `PROTOCOL.md`,
 and `TASKS.md`. The ComfyUI side is ported from the proven
 [NukeToComfyUI](https://github.com/NickPittas/NukeToComfyUI) bridge.
 
+<!-- moeffect-demo:start -->
+## Demo
+
+This collection overview includes AE2ComfyUI alongside CorridorKey nodes and NukeToComfyUI.
+
+https://github.com/user-attachments/assets/74f2133c-da1f-4751-b375-fd28d2eba31c
+
+[Watch on the website and read more about the tool collection](https://moeffect.gr/index.php/tools/comfyui-nodes/).
+
+<!-- moeffect-demo:end -->
+
 ## Components
 
 ```text
